@@ -99,16 +99,20 @@
 /opt/feishu-bot.git      代码仓库（push.sh 顺带同步），外部另有 GitHub 私有仓库
 ```
 
-### 改代码
+### 改代码（在服务器开发目录 `/opt/feishu-bot-dev`）
 
 ```bash
+cd /opt/feishu-bot-dev
+.venv/bin/python tests/run_all.py   # 全套测试：临时数据、不连企微、视觉模型假接口
 git add -A && git commit -m "改了什么、为什么"
-bash deploy/push.sh              # 推已提交的版本 + 重启 + 看启动日志
-bash deploy/push.sh --no-restart # 只推
-bash deploy/push.sh --rev 51d390b  # 退回某个旧版本
+bash deploy/release.sh              # 测试全过才发布到 /opt/feishu-bot + 重启 + 看启动日志
+bash deploy/release.sh --rev 51d390b  # 退回某个旧版本
 ```
 
-- 有没提交的修改 `push.sh` 会拒推；服务器 `/opt/feishu-bot/VERSION` 记着在跑哪一版，启动日志也打「代码版本」
+- 正式目录 `/opt/feishu-bot` 只由发布脚本写，不要直接改（看门狗随时会重启，撞上改了一半的代码就起不来）
+- 有没提交的修改、测试没全过都不让发布；`/opt/feishu-bot/VERSION` 记着在跑哪一版，启动日志也打「代码版本」
+- 本机同步：`git pull server main`，再 `git push origin main` 推到 GitHub（服务器连不上 GitHub）
+- 本机的 `deploy/push.sh` 是备用：服务器上有本机没有的提交时它会拒推
 - **本机不要启动 `bot.py`**：同一个 BotID 两边连会抢消息
 
 ### 改配置
@@ -193,6 +197,7 @@ botcore/
 ## 七、测试（都不联网、不花钱）
 
 ```bash
+python tests/run_all.py       # 全套：冒烟、晒单解析回归、活动切换、打卡（单聊 / 换模型 / 补判）、要表格 / 备份
 python test_rules.py          # 一句话会走规则、模型还是丢弃
 python test_parse.py          # 晒单解析：严格解析 / 容错抽字段
 python test_bulletin.py       # 离线生成一份通报（文字 + PNG + Excel）

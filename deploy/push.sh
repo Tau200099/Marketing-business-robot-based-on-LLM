@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 【备用】09-28 起平时在服务器开发，用服务器上的 deploy/release.sh 发布；这个脚本留着网络 / 服务器开发不便时用。
 # 把本机改好的【代码】推到服务器并重启机器人。在 D:\feishu_bot 下用 Git Bash 执行：
 #     bash deploy/push.sh                 推当前提交（HEAD）+ 重启 + 看启动日志
 #     bash deploy/push.sh --no-restart    只推不重启
@@ -31,6 +32,14 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+# 09-28 起在服务器开发（/opt/feishu-bot-dev + deploy/release.sh）：服务器代码仓库里可能有本机没有的提交，
+# 这时从本机推会把服务器上的新功能盖掉 —— 先 git pull server main
+git fetch -q server
+if ! git merge-base --is-ancestor server/main HEAD; then
+  echo "!! 服务器上有本机没有的提交，先同步：git pull server main"
+  exit 1
+fi
 
 if [[ "$REV" == HEAD ]]; then
   if [[ -n "$(git status --porcelain)" ]]; then

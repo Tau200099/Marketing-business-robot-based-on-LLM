@@ -111,15 +111,24 @@
   企微是 @ 模式：群里晒单（文字/照片）、传名册、喊「通报」都要 @机器人，否则它收不到。
   .env 里企微必填 WECOM_BOT_ID / WECOM_BOT_SECRET；WECOM_MCP_URL 可选（发文字用）。
 
+【在服务器上开发】（09-28 起）
+  开发目录 /opt/feishu-bot-dev（git 工作目录，改代码在这里）；正式目录 /opt/feishu-bot 只由发布脚本写，别直接改
+  全套测试：cd /opt/feishu-bot-dev && .venv/bin/python tests/run_all.py
+            （临时数据目录、不连企微、视觉模型假接口：不碰正式数据、不花钱；照片测试用 data/samples 里的涂黑样本）
+            只跑一组：.venv/bin/python tests/run_all.py activity
+  发布：先 git commit，再 bash deploy/release.sh（测试全过才发布 + 重启 + 看日志）；--rev <版本号> 退回；--no-restart 只发布
+  同步到本机和 GitHub：本机 D:\feishu_bot 下 git pull server main，再 git push origin main
+  加功能时在 tests/ 里补对应的测试；晒单写法的回归用例在 tests/cases/
+
 【代码版本管理】（09-28 起用 git）
-  代码在本机 D:eishu_bot 的 git 仓库；服务器 /opt/feishu-bot.git 和外部仓库各有一份提交历史
+  代码在本机 D:\feishu_bot 的 git 仓库；服务器 /opt/feishu-bot.git 和外部仓库各有一份提交历史
   数据、名册、.env、Excel、reports 不进库（见 .gitignore）
   看历史：git log --oneline
   服务器现在跑哪一版：cat /opt/feishu-bot/VERSION，或看机器人启动日志「代码版本：…」
   部署：bash deploy/push.sh   有没提交的修改会拒绝推，先 git add -A && git commit -m "改了什么"
   退回：bash deploy/push.sh --rev <版本号>   （版本号是 git log 最前面那串，比如 51d390b）
         只换服务器上跑的代码，本机不动；修好后正常提交再推就回到最新
-  本机代码丢了：git clone root@47.109.158.170:/opt/feishu-bot.git D:eishu_bot  （或从外部仓库 clone），再把 .env 放回去
+  本机代码丢了：git clone root@47.109.158.170:/opt/feishu-bot.git D:\feishu_bot  （或从外部仓库 clone），再把 .env 放回去
 
 【数据备份 与 报表存档】（09-28 起，两类分开）
   ① Excel 报表存档（给人看的）
