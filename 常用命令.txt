@@ -44,6 +44,14 @@
   切换前自动备份到 data/backups/切换活动前/；活动记录在 data/activity.json（删掉它就回到按星期的老办法）
   管理员名单：服务器 data/config.yaml 的 backup.admins
 
+【打卡「待判定」与视觉模型额度】（09-28 起）
+  视觉模型判不了（额度用完 / key 失效 / 网络）的打卡记「待判定」，涂黑缩小后的图存 data/checkin_pending/ 最多 3 天，
+  每 10 分钟自动补判，打卡通报发之前也补一次；判出来就改记录、删图
+  管理员单聊「补判打卡」：马上补判，回判出几张、还剩几张
+  额度用完自动换模型：qwen3-vl-plus -> qwen3-vl-flash -> qwen-vl-plus（config checkin.vision_fallback_models），
+    用完的歇 6 小时再试；换了、全用完、key 失效都会单聊提醒管理员（同一种 6 小时一次）
+  换 key：改服务器 data/.env 的 VISION_API_KEY，然后 systemctl restart feishu-bot，待判定的会自动补判
+
 【群里能喊的指令】
   通报 / 看通报 / 看排名 / 排名 / 清单     立刻发一份通报到当前群（1 分钟内只认一次）
   机器人自检                               链路自检，回一句「自检通过」
