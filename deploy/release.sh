@@ -27,6 +27,14 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
+# 只从 main 发布：新版本在别的分支上开发（09-29 国庆版在 guoqing 分支），没做完别误发上线。
+# 真要发某个分支，先合进 main
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+if [[ "$REV" == HEAD && "$BRANCH" != main ]]; then
+  echo "!! 当前在分支 $BRANCH，只能从 main 发布（先 git checkout main；新版本做完合进 main 再发）"
+  exit 1
+fi
+
 if [[ "$REV" == HEAD ]]; then
   if [[ -n "$(git status --porcelain)" ]]; then
     echo "!! 有没提交的修改，先提交再发布："
