@@ -220,6 +220,11 @@ class Order:
     fttr: int = 0                # FTTR
     box: int = 0                 # 云盒/AI视联网/智屏
     loaded: str = ""             # 晒单「是否加载」里勾了哪几样：云盒,AI,智屏,FTTR（国庆版套包分要分清智屏）
+    # ---- 多群（09-29 国庆版）：按人分类，一单只记一次，各张表按这几个字段取 ----
+    region: str = ""             # 城区 / 农村 / ""（未识别）
+    role: str = ""               # 活动 / 非活动 / 未识别（单群模式为空）
+    branch: str = ""             # 落地支局（简称）：晒单里写的「支局」，没写按人查；攻坚群总表按它算
+    community: bool = False      # 发单人是小区 / 场镇营销人员：总表里新增宽带、中高套 ×1.1
     points: int = 0              # 价值积分
 
     source: str = ""             # 文字晒单 / 图片晒单
@@ -685,8 +690,11 @@ class Campaign:
     """一次活动的全部订单 + 汇总。落盘，跨重启不丢。"""
 
     def __init__(self, roster: Roster, targets: Targets | None = None,
-                 path: str | Path | None = None) -> None:
+                 path: str | Path | None = None, rosters=None) -> None:
         self.roster = roster
+        # 多群模式：四张名册（regions.RosterSet）。有它就按人分城区 / 农村、活动 / 非活动
+        self.rosters = rosters
+        self._readonly = False
         self.targets = targets or Targets()
         self.path = Path(path) if path else DATA / "campaign.json"
         self.orders: list[Order] = []
@@ -721,6 +729,8 @@ class Campaign:
             log.info("按当前名册重新归组：%d 单", moved)
 
     def _save(self) -> None:
+        if self._readonly:
+            return                       # 区域视图只读，不许写台账
         tmp = self.path.with_suffix(".tmp")
         try:
             tmp.write_text(json.dumps(
@@ -736,9 +746,32 @@ class Campaign:
         名册文件变了就重载并把已有单重新归队。记单前、出表前各调一次 ——
         台账只允许机器人这一个进程写，别的进程（MCP）只改名册文件。
         """
-        if self.roster.maybe_reload():
+        if self._readonly:
+            return
+        changed = self.roster.maybe_reload()
+        if self.rosters is not None:
+            changed = self.rosters.maybe_reload() or changed
+        if changed:
             moved = self.reassign()
             log.info("按新名册重新归队：%d 单有变化", moved)
+
+    def view(self, region: str, targets: "Targets | None" = None) -> "Campaign":
+        """
+        某个区域的活动人员的单（城区 / 农村活动群的通报、晒单表用）。只读：不存盘、不重新归组。
+        订单对象和主台账是同一批，统计时只读不改。
+        """
+        from .regions import ACTIVITY
+        v = Campaign.__new__(Campaign)
+        v.rosters = None
+        v._readonly = True
+        v.roster = self.rosters.activity[region] if self.rosters is not None else self.roster
+        v.targets = targets or self.targets
+        v.path = self.path
+        v._seen = set()
+        v._lock = threading.Lock()
+        with self._lock:
+            v.orders = [o for o in self.orders if o.region == region and o.role == ACTIVITY]
+        return v
 
     def add(self, order: Order) -> bool:
         """
@@ -940,7 +973,44 @@ class Campaign:
         return rows
 
     # 归组时加的备注：重算前先摘掉，免得名册改了以后旧备注还挂着
-    _PLACE_NOTES = ("晒单人不在名册，按揽收人归组", "揽收人不在名册且没写支局", "揽收人不在名册")
+    _PLACE_NOTES = ("晒单人不在名册，按揽收人归组", "晒单人和揽收人都不在名册",
+                    "揽收人不在名册且没写支局", "揽收人不在名册")
+
+    def _place_multi(self, order: "Order") -> None:
+        """
+        多群模式归组（09-29）：按人分类，不按群。
+          ① 发消息的人 → 四张名册 → 城区 / 农村 × 活动 / 非活动
+          ② 对不上 → 按晒单里的「揽收人」再查一次
+          ③ 还对不上 → 未识别：只进攻坚群总表（按晒单里写的支局），标黄
+        活动人员的 小组 / 战队 按他那区的活动名册；非活动人员 战队 记成他的支局。
+        落地支局（总表用）= 晒单里写的「支局」；没写按人查到的支局。
+        """
+        from .regions import ACTIVITY, UNKNOWN, branch_stem
+        rs = self.rosters
+        if not order.branch:
+            # 第一次归组时 team 还是晒单里写的「支局」（build_order 放进来的），先存下来
+            order.branch = branch_stem(order.team)
+        ident = rs.identify_sender(order.sender_id) if order.sender_id else None
+        order.poster = ident.name if ident and ident.role != UNKNOWN else ""
+        if (ident is None or ident.role == UNKNOWN) and order.collector:
+            by_collector = rs.identify_name(order.collector)
+            if by_collector.role != UNKNOWN:
+                ident = by_collector
+                if order.sender_id:
+                    order.note = (order.note + " 晒单人不在名册，按揽收人归组").strip()
+        if ident is not None and ident.role != UNKNOWN:
+            order.region, order.role, order.community = ident.region, ident.role, ident.community
+            if ident.role == ACTIVITY:
+                order.group, order.team = ident.group, ident.team
+            else:
+                order.group, order.team = "", ident.branch
+            if not order.branch:
+                order.branch = ident.branch
+        else:
+            order.region, order.role, order.community = "", UNKNOWN, False
+            order.needs_review = True
+            order.note = (order.note + " 晒单人和揽收人都不在名册").strip()
+            order.team = order.branch
 
     def _place(self, order: "Order") -> None:
         """
@@ -951,6 +1021,9 @@ class Campaign:
           ③ 揽收人也查不到 -> 按晒单里写的「支局」只归战队，标待核对
         名册优先于晒单里手填的「支局」：支局可能填错，小组也只能从名册查。
         """
+        if self.rosters is not None:
+            self._place_multi(order)
+            return
         from .checkin import sender_name       # 账号 ID -> 名册姓名，和打卡归组同一套
         order.poster = sender_name(order.sender_id, self.roster) if order.sender_id else ""
         grp, team = self.roster.lookup(order.poster) if order.poster else ("", "")

@@ -37,6 +37,7 @@ from .campaign import (Campaign, NotRosterSheet, Roster, RosterImportError, buil
                        has_multiple_orders, looks_like_order, parse_order)
 from .extract import ExtractSettings, FieldExtractor
 from .faces import FaceError, FaceIndex
+from . import regions
 from .ledger_tools import resolve_period
 from .paths import DATA
 from .checkin import CheckinRecorder
@@ -175,6 +176,9 @@ class Pipeline:
         self.samples = SampleCollector(platform, store.ocr_settings, judge=self.checkin.judge_blob)
         # 人脸识别（只认少数几个人、本人已同意）：管理员单聊录入 / 认人
         self.faces = FaceIndex()
+        # 多群（09-29 国庆版）：四张名册 + 支局长名单；config 里配了农村群 / 攻坚群才启用
+        self.rosters = regions.RosterSet()
+        self._roster_pending: dict[tuple[str, str], tuple[str, float]] = {}   # (会话, 人) -> (哪张名册, 过期)
         self._face_pending: dict[tuple[str, str], tuple[str, str, float]] = {}   # (会话, 人) -> (动作, 姓名, 过期)
         self.checkin_bulletin = None          # bot.py 里挂上（打卡通报）
         self._excel_last: dict[str, float] = {}  # 单聊要表格的冷却
@@ -266,6 +270,9 @@ class Pipeline:
                 return
             # 管理员单聊「新活动 名称 10.1-10.4」「当前活动」「结束活动」
             if self._handle_activity_command(msg):
+                return
+            # 管理员单聊「农村活动名册」「城区支局名册」「支局长名单」…：接下来 2 分钟内发的 Excel 导进那张
+            if self._handle_roster_command(msg):
                 return
             # 管理员单聊「群号核对」：往 config 里配的每个群发一句群名，核对群号对不对
             if self._handle_group_check(msg):
@@ -433,6 +440,25 @@ class Pipeline:
                 send(uid, text)
             except Exception:
                 log.exception("给管理员 %s 发提醒失败", uid)
+
+    _ROSTER_PENDING_SECONDS = 120
+
+    def _handle_roster_command(self, msg: InboundMessage) -> bool:
+        text = (msg.text or "").strip()
+        if text not in regions.ROSTER_COMMANDS or msg.has_image:
+            return False
+        if msg.chat_type != "p2p":
+            self.platform.reply(msg, "名册请管理员单聊我发", msg.sender_id or None)
+            return True
+        if not self._is_admin(msg):
+            self.platform.reply(msg, "名册只能管理员更新", None)
+            return True
+        self._roster_pending[(msg.chat_id, msg.sender_id)] = (text, time.time() + self._ROSTER_PENDING_SECONDS)
+        if msg.has_file:
+            self._handle_file(msg)
+        else:
+            self.platform.reply(msg, f"好，2 分钟内把{text}的 Excel 发过来", None)
+        return True
 
     def _handle_group_check(self, msg: InboundMessage) -> bool:
         if (msg.text or "").strip() != "群号核对" or msg.has_image or msg.has_file:
@@ -945,7 +971,11 @@ class Pipeline:
         if self._campaign is None:
             with self._campaign_lock:
                 if self._campaign is None:
-                    self._campaign = Campaign(Roster(), self.store.campaign_settings().targets)
+                    if regions.multi_enabled(self.store):
+                        self._campaign = Campaign(self.rosters.activity[regions.CITY],
+                                                  self.store.campaign_settings().targets, rosters=self.rosters)
+                    else:
+                        self._campaign = Campaign(Roster(), self.store.campaign_settings().targets)
         return self._campaign
 
     def _record_rule_order(self, msg: InboundMessage, text: str, rule) -> None:
@@ -1112,6 +1142,30 @@ class Pipeline:
                 continue
             name = name or "（无文件名的 Excel）"
             camp = self.campaign()
+            if regions.multi_enabled(self.store) and self._is_admin(msg):
+                # 多群模式：必须先说是哪张名册（四张 + 支局长名单格式都不一样，猜错了会覆盖别的表）
+                which, until = self._roster_pending.pop((msg.chat_id, msg.sender_id), ("", 0.0))
+                if not which or time.time() > until:
+                    self.platform.reply(msg, "请先说是哪张名册：城区支局名册 / 城区活动名册 / 农村支局名册 / "
+                                             "农村活动名册 / 支局长名单，再发 Excel", None)
+                    continue
+                try:
+                    summary = self.rosters.import_named(which, data)
+                except NotRosterSheet as exc:
+                    self.platform.reply(msg, f"{which}没更新：这不像{which}（{exc}）", None)
+                    continue
+                except RosterImportError as exc:
+                    self.platform.reply(msg, f"{which}没更新：{exc}", None)
+                    continue
+                except Exception as exc:
+                    log.exception("导入%s出错", which)
+                    self.platform.reply(msg, f"{which}没更新成：{exc}", None)
+                    continue
+                moved = camp.reassign()
+                text = f"{which}已更新：{summary}" + (f"，已有 {moved} 单重新归类" if moved else "")
+                log.info("%s（来自 %s）", text, name)
+                self.platform.reply(msg, text, None)
+                continue
             if not self._is_admin(msg):
                 # 名册只给管理员更新（09-28）：别人发的先看是不是名册表，是才提示，不是就当普通文件不理
                 try:
