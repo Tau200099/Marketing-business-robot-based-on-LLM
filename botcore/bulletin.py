@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 
+from . import activity
 from .campaign import Campaign, CampaignSettings, GroupStat, Targets, TeamStat
 from .paths import DATA, ROOT
 from .checkin import day_sheets
@@ -327,7 +328,8 @@ class Bulletin:
         if not cfg.enabled:
             return
         now = datetime.now()
-        if now.isoweekday() in set(cfg.days or ()):
+        # 有活动文件就只在活动期间发；没有按 config 的星期（09-28）
+        if activity.allows(now, cfg.days):
             self._check_fixed(cfg, now)
         self._check_pending(cfg)
 

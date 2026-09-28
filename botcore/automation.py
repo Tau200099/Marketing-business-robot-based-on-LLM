@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 
+from . import activity
 from .paths import DATA
 
 log = logging.getLogger("botcore.automation")
@@ -166,7 +167,7 @@ class StickerAutomation:
         active_days 用 ISO 星期：周一=1 … 周日=7。
         """
         now = now or datetime.now()
-        if now.isoweekday() not in set(cfg.active_days or ()):
+        if not activity.allows(now, cfg.active_days):      # 有活动文件就看活动日期（09-28）
             return False
         start = _parse_hhmm(cfg.active_start, dtime(8, 30))
         end = _parse_hhmm(cfg.active_end, dtime(20, 30))
@@ -174,6 +175,9 @@ class StickerAutomation:
 
     @staticmethod
     def _window_desc(cfg) -> str:
+        if activity.managed():
+            act = activity.load()
+            return f"活动期间（{act.span() if act else '未设置'}）{cfg.active_start}-{cfg.active_end}"
         names = {1: "一", 2: "二", 3: "三", 4: "四", 5: "五", 6: "六", 7: "日"}
         days = "".join(names.get(d, "?") for d in sorted(cfg.active_days or ()))
         return f"周{days} {cfg.active_start}-{cfg.active_end}"
@@ -194,7 +198,7 @@ class StickerAutomation:
             if not cat:
                 continue
             days = item.get("days") or cfg.active_days or ()
-            if now.isoweekday() not in set(days):
+            if not activity.allows(now, days):       # 有活动文件时活动期外一律不发（用户 09-28：不照常）
                 continue
             if self._state.daily_sent.get(cat) == today:
                 continue

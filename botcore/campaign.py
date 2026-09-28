@@ -394,7 +394,7 @@ class Roster:
                 out.extend(items)
         return out
 
-    def import_workbook(self, data: bytes) -> str:
+    def import_workbook(self, data: bytes, dry_run: bool = False) -> str:
         """
         从群里上传的 Excel 更新名册，返回一句给群里看的结果。
 
@@ -477,6 +477,8 @@ class Roster:
                 f"检查表格排版；确实是缩编的话先删掉 roster.json 再发")
 
         people = _names_as_groups(people)
+        if dry_run:                          # 只看是不是名册表、能不能读（非管理员发的名册用）
+            return f"{len(people)} 人"
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps({"teams": teams, "people": people},
                                   ensure_ascii=False, indent=2), encoding="utf-8")

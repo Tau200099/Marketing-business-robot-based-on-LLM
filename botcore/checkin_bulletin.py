@@ -28,6 +28,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 
+from . import activity
 from .bulletin import _font
 from .checkin import GREEN, RED, checkin_title, load_records, select, slot_of, table_blocks, team_display
 from .paths import DATA
@@ -189,7 +190,8 @@ class CheckinBulletin:
 
     def _tick(self, now: datetime) -> None:
         s = self.store.checkin_settings()
-        if not (s.enabled and s.bulletin_enabled) or now.isoweekday() not in set(s.bulletin_days or ()):
+        # 有活动文件就只在活动期间发；没有按 config 的 bulletin_days（09-28）
+        if not (s.enabled and s.bulletin_enabled) or not activity.allows(now, s.bulletin_days):
             return
         today = now.strftime("%Y-%m-%d")
         ready = getattr(self.platform, "is_ready", None)

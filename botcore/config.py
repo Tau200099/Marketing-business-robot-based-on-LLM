@@ -9,12 +9,13 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
 
+from . import activity
 from .assistant import AssistantSettings
 from .bulletin import BulletinSettings
 from .backup import BackupSettings
@@ -179,6 +180,7 @@ class ConfigStore:
         self.path = path
         self._lock = threading.Lock()
         self._mtime = 0.0
+        self._overlay: dict = {}
         self._bundle = self._read()
         self._mtime = self.path.stat().st_mtime
 
@@ -215,9 +217,24 @@ class ConfigStore:
         with self._lock:
             return self._bundle.dedupe
 
+    def _with_activity(self, key: str, base, **fields):
+        """
+        data/activity.json 里的当前活动盖到配置上（活动名 -> campaign.title，活动日期 -> checkin.span）。
+        按（配置对象, 活动文件 mtime）缓存：没变就返回同一个对象，别的地方拿对象身份当缓存键不受影响。
+        """
+        stamp = (id(base), activity.mtime())
+        hit = self._overlay.get(key)
+        if hit and hit[0] == stamp:
+            return hit[1]
+        out = replace(base, **fields) if fields else base
+        self._overlay[key] = (stamp, out)
+        return out
+
     def campaign_settings(self) -> CampaignSettings:
         with self._lock:
-            return self._bundle.campaign
+            base = self._bundle.campaign
+        act = activity.load()
+        return self._with_activity("campaign", base, **({"title": act.title} if act and act.title else {}))
 
     def bulletin_settings(self) -> BulletinSettings:
         with self._lock:
@@ -233,7 +250,9 @@ class ConfigStore:
 
     def checkin_settings(self) -> CheckinSettings:
         with self._lock:
-            return self._bundle.checkin
+            base = self._bundle.checkin
+        act = activity.load()
+        return self._with_activity("checkin", base, **({"span": act.span()} if act else {}))
 
     def backup_settings(self) -> BackupSettings:
         with self._lock:

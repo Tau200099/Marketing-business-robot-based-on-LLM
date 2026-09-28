@@ -27,6 +27,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from . import activity
 from .assistant import NOT_A_QUESTION, Assistant, AssistantSettings, looks_like_question
 from .config import ROOT, ConfigStore
 from .distill import distill, distill_text, redact
@@ -232,6 +233,9 @@ class Pipeline:
             # 群里喊「打卡通报」：发当前时段的打卡情况
             if self.checkin_bulletin is not None and self.checkin_bulletin.handle_command(msg):
                 return
+            # 管理员单聊「新活动 名称 10.1-10.4」「当前活动」「结束活动」
+            if self._handle_activity_command(msg):
+                return
             # 管理员单聊「备份」「备份 9.25」：发那天的数据备份包
             if self._handle_backup_request(msg):
                 return
@@ -244,6 +248,10 @@ class Pipeline:
             # 文件消息只有一个用途：上传名册 Excel 更新分组
             if msg.has_file:
                 self._handle_file(msg)
+                return
+
+            # 活动期外群里的晒单、打卡照片：不记、不点赞，回一句（09-28 用户定：活动外不照常）
+            if self._off_activity_post(msg):
                 return
 
             text, branch, stamp = self._collect_text(msg)
@@ -289,6 +297,82 @@ class Pipeline:
             self._ask_agent(msg, text, branch, stamp, t0)
         except Exception:
             log.exception("处理消息时抛异常 msg_id=%s", msg.msg_id)
+
+    # ---------- 活动 ----------
+
+    def _is_admin(self, msg: InboundMessage) -> bool:
+        return bool(msg.sender_id) and msg.sender_id in set(self.store.backup_settings().admins or ())
+
+    def _handle_activity_command(self, msg: InboundMessage) -> bool:
+        """
+        「新活动 秋促专项营销活动 10.1-10.4」「当前活动」「结束活动」。
+        看当前活动谁都行；开 / 结束只给管理员，而且只在单聊（群里说了提示去单聊）。
+        """
+        text = (msg.text or "").strip()
+        if msg.has_image or msg.has_file or not text or len(text) > 60:
+            return False
+        if activity._CMD_SHOW.match(text):
+            act = activity.load()
+            reply = activity.describe(act)
+            if act is None and not activity.managed():
+                reply += "（按 config 里的星期发通报）"
+            reply += f"。名册 {len(self.campaign().roster.people)} 人"
+            self.platform.reply(msg, reply, None)
+            return True
+        is_new, is_end = bool(activity._CMD_NEW.match(text)), bool(activity._CMD_END.match(text))
+        if not (is_new or is_end):
+            return False
+        if msg.chat_type != "p2p":
+            self.platform.reply(msg, "切换活动请管理员单聊我", msg.sender_id or None)
+            return True
+        if not self._is_admin(msg):
+            log.warning("非管理员 %s 想切换活动，已拒绝：%s", msg.sender_id, text[:40])
+            self.platform.reply(msg, "只有管理员能切换活动", None)
+            return True
+        if is_end:
+            act = activity.load()
+            if act is None:
+                reply = "现在没有设置活动"
+            elif act.status() != "进行中":
+                reply = f"{activity.describe(act)}，不用再结束"
+            else:
+                act = activity.end_now(msg.sender_id)
+                reply = (f"{activity.describe(act)}。从现在起群里的晒单、打卡不记录，通报和表情包都停了。"
+                         f"开下一个活动发：新活动 名称 10.1-10.4")
+            self.platform.reply(msg, reply, None)
+            return True
+        try:
+            title, start, end = activity.parse_new(text)
+        except ValueError as exc:
+            self.platform.reply(msg, f"活动没切换：{exc}", None)
+            return True
+        # 切换前留底：打一份现在的数据备份
+        try:
+            from .backup import BACKUP_DIR, make_zip
+            d = BACKUP_DIR / "切换活动前"
+            make_zip(d / f"备份_{datetime.now():%Y-%m-%d_%H%M%S}.zip")
+            for old in sorted(d.glob("备份_*.zip"))[:-10]:
+                old.unlink()
+        except Exception:
+            log.exception("切换活动前备份失败（不影响切换）")
+        act = activity.start_new(title, start, end, msg.sender_id, self.store.campaign_settings().title)
+        self.store.checkin_settings()          # 让打卡表标题马上用新日期
+        n = len(self.campaign().roster.people)
+        self.platform.reply(msg, (
+            f"已切换：{activity.describe(act)}。活动期间记晒单和打卡、发通报和表情包，活动外全停。"
+            f"切换前已备份。现在名册 {n} 人，要换名册就接着单聊发新名册 Excel"), None)
+        return True
+
+    def _off_activity_post(self, msg: InboundMessage) -> bool:
+        """群里、活动期外、像晒单或打卡（有图 / 晒单格式）-> 回一句不记，返回 True。"""
+        if msg.chat_type == "p2p" or not activity.managed() or activity.is_active():
+            return False
+        text = msg.text or ""
+        if not (msg.has_image or parse_order(text) or looks_like_order(text) >= 2):
+            return False
+        log.info("活动期外的晒单 / 打卡，不记：%s", redact(text)[:40].replace("\n", " ") or "（图片）")
+        self.platform.reply(msg, activity.off_notice(), msg.sender_id or None)
+        return True
 
     # ---------- 单聊取备份 ----------
 
@@ -799,8 +883,20 @@ class Pipeline:
                 log.info("收到文件 %s，不是 Excel，跳过", name or "（无文件名）")
                 continue
             name = name or "（无文件名的 Excel）"
-            log.info("收到 Excel %s（%d 字节），按名册导入", name, len(data))
             camp = self.campaign()
+            if not self._is_admin(msg):
+                # 名册只给管理员更新（09-28）：别人发的先看是不是名册表，是才提示，不是就当普通文件不理
+                try:
+                    camp.roster.import_workbook(data, dry_run=True)
+                except NotRosterSheet:
+                    log.info("文件 %s 不是名册表，跳过", name)
+                    continue
+                except Exception:
+                    pass
+                log.warning("非管理员 %s 发了名册 %s，没导入", msg.sender_id, name)
+                self.platform.reply(msg, "名册只能管理员更新，请把名册发给管理员", msg.sender_id or None)
+                continue
+            log.info("收到 Excel %s（%d 字节），按名册导入", name, len(data))
             try:
                 summary = camp.roster.import_workbook(data)
             except NotRosterSheet as exc:
