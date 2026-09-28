@@ -183,6 +183,10 @@ class Pipeline:
         # 多群（09-29 国庆版）：四张名册 + 支局长名单；config 里配了农村群 / 攻坚群才启用
         self.rosters = regions.RosterSet()
         self._roster_pending: dict[tuple[str, str], tuple[str, float]] = {}   # (会话, 人) -> (哪张名册, 过期)
+        # 支局长打卡点检（人脸）：每张打卡照都过一遍，认出支局长就记下时间（09-29）
+        from .chiefs import ChiefBoard
+        self.chief_board = ChiefBoard(self.faces, self.rosters, store)
+        self.checkin.on_photo = self.chief_board.on_photo
         self._face_pending: dict[tuple[str, str], tuple[str, str, float]] = {}   # (会话, 人) -> (动作, 姓名, 过期)
         self.checkin_bulletin = None          # bot.py 里挂上（打卡通报）
         self._excel_last: dict[str, float] = {}  # 单聊要表格的冷却
@@ -278,6 +282,9 @@ class Pipeline:
                 return
             # 管理员单聊「农村活动名册」「城区支局名册」「支局长名单」…：接下来 2 分钟内发的 Excel 导进那张
             if self._handle_roster_command(msg):
+                return
+            # 管理员单聊「休息 杨钰航」「补记 严健齐 10:37」：支局长点检表人工改
+            if self._handle_chief_command(msg):
                 return
             # 管理员单聊「群号核对」：往 config 里配的每个群发一句群名，核对群号对不对
             if self._handle_group_check(msg):
@@ -445,6 +452,58 @@ class Pipeline:
                 send(uid, text)
             except Exception:
                 log.exception("给管理员 %s 发提醒失败", uid)
+
+    _CHIEF_CMD = re.compile(r"^\s*(休息|补记)\s+")
+    _TIME_TOKEN = re.compile(r"^(\d{1,2})[:：](\d{2})$")
+    _DATE_TOKEN = re.compile(r"^(\d{1,2})[.．/月](\d{1,2})日?$")
+
+    def _handle_chief_command(self, msg: InboundMessage) -> bool:
+        """
+        「休息 杨钰航」「休息 杨钰航 10.2」→ 那天早会 / 中午集合 / 第1户写休息；
+        「补记 严健齐 10:37」「补记 文龙 严健齐 10.2 10:37」→ 加一户（认不出脸时人工补）。只给管理员单聊。
+        """
+        text = (msg.text or "").strip()
+        m = self._CHIEF_CMD.match(text)
+        if not m or msg.has_image or msg.has_file:
+            return False
+        if msg.chat_type != "p2p":
+            self.platform.reply(msg, "支局长点检请管理员单聊我改", msg.sender_id or None)
+            return True
+        if not self._is_admin(msg):
+            self.platform.reply(msg, "只有管理员能改支局长点检", None)
+            return True
+        kind = m.group(1)
+        tokens = text.split()[1:]
+        chiefs = self.rosters.chiefs.names()
+        name = next((t for t in tokens if t in chiefs), "")
+        tm = next((self._TIME_TOKEN.match(t) for t in tokens if self._TIME_TOKEN.match(t)), None)
+        dm = next((self._DATE_TOKEN.match(t) for t in tokens if self._DATE_TOKEN.match(t)), None)
+        if not name:
+            others = [t for t in tokens if not self._TIME_TOKEN.match(t) and not self._DATE_TOKEN.match(t)]
+            who = others[-1] if others else ""
+            self.platform.reply(msg, f"支局长名单里没有「{who}」，这样发：{kind} 严健齐"
+                                     + (" 10:37" if kind == "补记" else ""), None)
+            return True
+        today = datetime.now().date()
+        day = today
+        if dm:
+            try:
+                day = today.replace(month=int(dm.group(1)), day=int(dm.group(2)))
+            except ValueError:
+                self.platform.reply(msg, "日期不对，这样写：10.2", None)
+                return True
+        d = day.strftime("%Y-%m-%d")
+        if kind == "休息":
+            self.chief_board.add_manual("rest", name, d)
+            self.platform.reply(msg, f"已标记：{name} {day.month}.{day.day} 休息", None)
+            return True
+        if not tm:
+            self.platform.reply(msg, f"要写几点，这样发：补记 {name} 10:37", None)
+            return True
+        hm = f"{int(tm.group(1)):02d}:{tm.group(2)}"
+        self.chief_board.add_manual("add", name, d, hm)
+        self.platform.reply(msg, f"已补记：{name} {day.month}.{day.day} {hm} 一户", None)
+        return True
 
     _ROSTER_PENDING_SECONDS = 120
 
