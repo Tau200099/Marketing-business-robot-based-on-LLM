@@ -1,0 +1,112 @@
+﻿================================================================
+  业绩机器人 · 常用命令
+  （在 D:\feishu_bot 目录下打开 PowerShell 执行）
+================================================================
+
+【⚠️ 2026-09-23 起机器人跑在服务器上】
+  正式运行在阿里云 47.109.158.170（见下面【服务器】一节），本机【不要】再启动 bot.py ——
+  两边用同一个机器人账号，同时连会互相抢，群里 @ 的消息落到哪边说不准。
+  本机只用来改代码，改完用 bash deploy/push.sh 推上去。
+
+【本机调试（只在服务器停掉时用）】
+  .venv\Scripts\python bot.py            启动机器人（窗口别关，Ctrl+C 退出）
+  Ctrl+C                                 停止（没反应就再按一次强制退出）
+
+【启动前 / 出问题时先跑这两个】
+  .venv\Scripts\python preflight.py      自检：凭证、权限、模型、字体、名册
+  .venv\Scripts\python diagnose.py       列出机器人所在的群（拿 chat_id 填 .env 的 FEISHU_CHAT_IDS）
+  .venv\Scripts\python diagnose.py --image 照片.jpg
+                                         拿一张本地照片跑完整链路（OCR→粗筛→模型），看卡在哪一步
+
+【离线测试（不联网、不发消息、不花钱）】
+  .venv\Scripts\python test_bulletin.py                 生成本周的通报（文字打印在终端，图和 Excel 在 reports\）
+  .venv\Scripts\python test_bulletin.py 2026-09-03      只统计这一天
+  .venv\Scripts\python test_bulletin.py 2026-09-01 2026-09-07
+  .venv\Scripts\python test_rules.py "新增199"          看一句话会走规则 / 模型 / 丢弃哪条路
+  .venv\Scripts\python test_llm.py                      验证模型 API 通不通
+  .venv\Scripts\python test_parse.py "支局 新盛 新增 139 揽收 郭静"
+                                                     看一段晒单文字会怎么解析（--no-llm 不花钱）
+
+【TeleAgent 接入】（配置见 docs\TeleAgent接入.md）
+  .venv\Scripts\python mcp_server.py --check   导入前自检：起服务端、列 10 个工具、调两个
+  TeleAgent：头像 -> 设置 -> 工具设置 -> 从JSON导入，粘 teleagent\mcp_config.json 的内容
+  TeleAgent：技能 -> 技能广场 -> 导入技能，选 teleagent\业绩通报技能.zip
+  TeleAgent 里问：本周各战队业绩 / 导出 Excel 做周报 PPT / 把通报发到群里 / 用 xx.xlsx 更新名册
+
+【群里能喊的指令】
+  通报 / 看通报 / 看排名 / 排名 / 清单     立刻发一份通报到当前群（1 分钟内只认一次）
+  机器人自检                               链路自检，回一句「自检通过」
+  @机器人 今天各战队情况 / 杨桐这周多少分 / 哪些组还没晒单 / 东林今天办了哪些单 / 发一下通报
+                                         问答助手：@ 了才答，数字来自台账
+  直接发活动 Excel（带「分组」sheet）        自动更新名册，回「名册已更新：xx 人 / xx 个战队 / xx 个小组」
+
+【通报什么时候自动发】
+  有新单        跟着发到晒单的群，一小时最多一次（没到间隔的会补发）
+  11:50 / 21:00 定点发到 .env 里 FEISHU_CHAT_IDS 的群
+  统计周期      排名按天（每天重新比）、清单按周（周一自动翻页）—— config.yaml 的 campaign 段
+
+【改配置改哪里】（config.yaml 改完 5 秒自动生效，不用重启）
+  campaign:   统计周期、活动名、目标值（8/4/5/1000）和权重
+  bulletin:   定点时刻、跟单间隔、通报话术、发不发图/Excel
+  stickers:   表情包分类、活跃时段、定点时刻
+  tally:      战报话术
+  agent:      模型、粗筛词、业务背景（加新套餐就改这里的 context）
+  rules:      固定话术规则（山城卡那条在这里）
+  .env        凭证、群 ID（改了要重启）
+
+【文件在哪】
+  reports\              每次通报生成的 PNG 和 Excel
+  campaign.json         活动台账（每一单一行）—— 丢了要重录，别删
+  roster.json           名册（群里传 Excel 会自动改）
+  assets\stickers\      表情包，文件名以分类开头：点赞1.gif 捷报频传2.GIF …
+  tally.json            当天战报计数，跨天自动清
+
+【服务器】（47.109.158.170，SSH 密钥登录，服务名 feishu-bot）
+  ssh root@47.109.158.170                              登录
+  systemctl status feishu-bot                          看状态
+  systemctl restart feishu-bot                         重启（改了 .py 或 .env 必须重启）
+  journalctl -u feishu-bot -f                          看实时日志（Ctrl+C 退出）
+  journalctl -u feishu-bot -n 200                      看最近 200 行
+  cd /opt/feishu-bot && BOT_DATA_DIR=/opt/feishu-bot/data .venv/bin/python deploy/preflight.py    服务器上自检
+
+  目录：代码 /opt/feishu-bot，配置和数据 /opt/feishu-bot/data
+        （config.yaml / .env / roster.json / campaign.json / 状态文件 / 表情包 / 打卡样本 都在 data 里）
+  改配置：直接改服务器上的 /opt/feishu-bot/data/config.yaml，热加载不用重启；
+          改 .env 要 systemctl restart feishu-bot。本机根目录那份 config.yaml 已不生效。
+  改代码：本机改完，在 D:\feishu_bot 下用 Git Bash 执行
+          bash deploy/push.sh                推代码 + 重启 + 看启动日志
+          bash deploy/push.sh --no-restart   只推不重启
+  旧版备份：/opt/feishu-bot.bak-20260923（9 月初的轮询版，确认没问题后可删）
+
+  TeleAgent 连服务器上的台账：导入 teleagent\mcp_config.json（本机转接器 mcp_remote.py，走 SSH，服务器不开端口）
+  自检：.venv\Scripts\python mcp_remote.py --check   （列工具 + 导出一份报表，看文件有没有拉回 reports\）
+
+  企微是 @ 模式：群里晒单（文字/照片）、传名册、喊「通报」都要 @机器人，否则它收不到。
+  .env 里企微必填 WECOM_BOT_ID / WECOM_BOT_SECRET；WECOM_MCP_URL 可选（发文字用）。
+
+【数据备份 与 报表存档】（09-28 起，两类分开）
+  ① Excel 报表存档（给人看的）
+     每天 02:35 自动存前一天的两份：/opt/feishu-bot/data/archive/晒单/晒单_日期.xlsx（晒单数据 + 那周到那天的清单）
+                                   /opt/feishu-bot/data/archive/打卡/打卡_日期.xlsx（上午 / 下午 / 晚上三张打卡表）
+     存档和 reports/ 里现生成的表格都只留 14 天（跟 backup.keep_days 走），同一个 cron 顺手清
+     单聊机器人要：「晒单表格发我」只发晒单 /「打卡表格发我」只发打卡 /「表格发我」「Excel 发我」两个都发
+                   后面加日期发那天存档的：「打卡表格 9.25」「昨天的晒单表格」「上周的清单」（取上周日那份 = 整周清单）
+                   今天的当场生成；谁都能单聊要，群里要会提示去单聊
+     补存某天：cd /opt/feishu-bot && BOT_DATA_DIR=/opt/feishu-bot/data .venv/bin/python -m botcore.archive 2026-09-25
+  ② JSON 原始数据备份（恢复数据用）
+     每天 02:30 自动打包到 /opt/feishu-bot/data/backups/备份_日期.zip，留 14 天
+     （台账、打卡、名册、账号对照、状态文件、config.yaml；不含 .env、打卡样本照片、reports、Excel 存档）
+     写之前留底：台账 / 打卡 / 名册每次保存前留一份旧版本在 data/history/，每个文件最近 20 版
+     单聊取：只给管理员（data/config.yaml 的 backup.admins），发「备份」「json」「备份 9.25」「昨天的备份」
+     恢复：把 zip 里要的文件放回 /opt/feishu-bot/data 覆盖，然后 systemctl restart feishu-bot
+           退回当天早些时候：从 data/history/campaign/ 挑一版，改名 campaign.json 放回去再重启
+     手动打一次快照：cd /opt/feishu-bot && BOT_DATA_DIR=/opt/feishu-bot/data .venv/bin/python -m botcore.backup snapshot
+  加管理员：改服务器 data/config.yaml 的 backup.admins: [HuangTao, 账号ID]，保存即生效
+
+【飞书开放平台要开的权限】（https://open.feishu.cn/app）
+  im:message.group_msg          收群里所有消息（需管理员审批）
+  im:message:send_as_bot        以机器人身份发消息
+  im:resource                   下载图片 / 文件
+  im:chat:readonly              查群成员姓名
+  contact:user.base:readonly    （可选）通讯录查姓名
+  事件订阅：长连接 + im.message.receive_v1，改完要重新发布版本

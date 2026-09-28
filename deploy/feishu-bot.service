@@ -1,0 +1,48 @@
+# 放到 /etc/systemd/system/feishu-bot.service
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now feishu-bot
+#   sudo systemctl status feishu-bot
+#   sudo journalctl -u feishu-bot -f          # 看实时日志
+
+[Unit]
+Description=业绩点赞机器人（企业微信）
+# 网络没起来就连不上企微，等一等
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=botuser
+WorkingDirectory=/opt/feishu-bot
+ExecStart=/opt/feishu-bot/.venv/bin/python bot.py
+
+# 【必须】所有定时规则用的都是本机时间：早上加油 8:30、下午加油 14:00、
+# 活跃时段 8:30-20:30、通报 11:50/21:00。服务器默认常是 UTC，
+# 不设这个的话全部会差 8 小时。
+Environment="TZ=Asia/Shanghai"
+# 日志里的中文不要变成 \uxxxx
+Environment="PYTHONIOENCODING=utf-8"
+# 让日志实时进 journal，不然崩溃时最后几行会丢
+Environment="PYTHONUNBUFFERED=1"
+
+# 挂了自动重启。机器人是长跑进程，网络抖动、企微限流都可能让它退出
+Restart=always
+RestartSec=10
+# 但别无限重启：5 分钟内失败 5 次就停下，说明是配置问题不是偶发
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# 优雅退出：先发 SIGINT（代码里做了两段式关闭），20 秒还没退就强杀
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+# 基本加固。机器人只需要读写自己目录，不需要碰系统其它地方
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/feishu-bot
+
+[Install]
+WantedBy=multi-user.target

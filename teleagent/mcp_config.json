@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "yeji": {
+      "command": "D:\\feishu_bot\\.venv\\Scripts\\python.exe",
+      "args": ["D:\\feishu_bot\\mcp_remote.py"],
+      "env": {
+        "PYTHONIOENCODING": "utf-8",
+        "PROGRAMDATA": "C:\\ProgramData"
+      }
+    }
+  }
+}

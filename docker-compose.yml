@@ -1,0 +1,24 @@
+services:
+  bot:
+    build: .
+    image: feishu-bot:latest
+    container_name: feishu-bot
+    restart: unless-stopped
+
+    # 数据目录：把宿主机的 ./data 挂进去。
+    # 里面要有 config.yaml、.env、assets/stickers/，
+    # 状态 json 会自动生成在这里。
+    volumes:
+      - ./data:/data
+
+    environment:
+      TZ: Asia/Shanghai
+      BOT_DATA_DIR: /data
+
+    # 机器人全是【出站】连接，不需要映射任何端口
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

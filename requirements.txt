@@ -1,0 +1,29 @@
+lark-oapi>=1.4.0
+python-dotenv>=1.0.1
+PyYAML>=6.0.1
+requests>=2.31        # 调大模型 API 用；别依赖 lark-oapi 间接带进来
+
+# ---- 图片 OCR（config.yaml 里 ocr.enabled: true 时需要）----
+rapidocr-onnxruntime>=1.4.0
+
+# onnxruntime 必须锁版本。实测 1.29.0 在 Windows 10 上导入即崩：
+#   ImportError: DLL load failed while importing onnxruntime_pybind11_state
+# 机器有 VC++ 14.40 运行库、CPU 也支持 AVX2，排除了这两类常见原因，
+# 是这个版本自身的问题。1.19.2 实测正常。
+onnxruntime>=1.19,<1.20
+
+# ---- 企业微信（platform: wecom 时需要）----
+# 企微把能力包成了 MCP 服务器，走 Streamable HTTP 协议调用，不是 REST
+mcp>=2.0
+
+# ---- 表情包 / 发图发文件（stickers.enabled: true 时需要）----
+# 企微发图必须要 media_id，而 media_id 只能通过【长连接】分片上传获得，
+# MCP 那条通道没有上传能力。这个 SDK 就是那条长连接。
+wecom-aibot-python-sdk @ git+https://github.com/WecomTeam/wecom-aibot-python-sdk.git
+
+# ---- 业绩统计出表 ----
+openpyxl>=3.1          # 生成 Excel 战报
+Pillow>=10.0           # 渲染通报图片、表情包占位图
+
+# ---- 打卡核验：企微只给发送人账号 ID（姓名拼音），按拼音对到名册 ----
+pypinyin>=0.50

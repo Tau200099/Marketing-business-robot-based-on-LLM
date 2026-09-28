@@ -1,0 +1,27 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.log
+tally.json
+tally.tmp
+figures/
+dedupe.json
+samples/
+backups/
+history/
+archive/
+
+# ---- 09-28 进版本库时加：数据 / 个人信息 / 运行产物不进库 ----
+# 根目录的 json 全是运行数据（名册、台账、状态、去重）；teleagent/mcp_config.json 这类子目录的不受影响
+/*.json
+/*.tmp
+/*.xlsx
+reports/
+uploads/
+backup_*/
+cleanup_*/
+data/
+.temp_*
+/VERSION
