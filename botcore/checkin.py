@@ -327,6 +327,12 @@ def mask_and_encode(shrunk: bytes, items: list, max_side: int) -> bytes:
     return buf.getvalue()
 
 
+def masked_jpeg(blob: bytes, ocr_settings, max_side: int = 1024) -> bytes:
+    """原图 -> 送模型的那个版本（证件 / 验证码 / 病历 / 长数字行涂黑，缩到 max_side）。样本也只存这个。"""
+    shrunk, items = _ENGINE.read_items(blob, ocr_settings)
+    return mask_and_encode(shrunk, items, max_side)
+
+
 class VisionJudge:
     DOWN_HOURS = 6       # 额度用完的模型歇多久再试（充值 / 换 key 后能自己回到主模型）
 

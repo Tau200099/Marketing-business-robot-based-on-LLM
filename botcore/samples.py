@@ -11,13 +11,14 @@
 后面带不带「打卡」都行（「样本 拦截打卡」= 「样本 拦截」），「演示」= 「设备演示」。
 
 收到后：
-    · 照片原样存到 samples/checkin/<日期>/<序号>_<类型>_<时分秒>.<后缀>
+    · 照片存【涂黑缩小版】（和送视觉模型的一样：证件 / 验证码 / 病历 / 长数字行涂黑，缩到 1024）到
+      samples/checkin/<日期>/<序号>_<类型>_<时分秒>.jpg；业务单（「业务:…」）不存照片 ——
+      它按工作内容文字判、评测用不上，又最常拍到证件（09-28 用户定，原图已删）
     · OCR 出来的文字【脱敏后】追加到 samples/checkin/index.jsonl
     · 回一句「样本已收 #12 板夹」
     · 不点赞、不入清单、不触发通报
 
-⚠️ 这个目录存的是现场原图（可能拍到客户证件），只留在本机：
-    已加进 .gitignore；判定规则定下来、评测跑完就该整个删掉。
+⚠️ 涂黑版照片里仍有客户的脸和家里的样子，只留在服务器，不进 git、不进备份；评测时临时拉到本机，用完删。
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ import threading
 import time
 from datetime import datetime
 
+from .checkin import masked_jpeg
 from .distill import distill, redact
 from .image import recognize
 from .message import InboundMessage
@@ -63,16 +65,6 @@ def _scrub(ocr: str) -> str:
 
 ROOT = DATA / "samples" / "checkin"
 INDEX = ROOT / "index.jsonl"
-
-
-def _ext(blob: bytes) -> str:
-    if blob[:3] == b"\xff\xd8\xff":
-        return "jpg"
-    if blob[:8] == b"\x89PNG\r\n\x1a\n":
-        return "png"
-    if blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
-        return "webp"
-    return "bin"
 
 
 class SampleCollector:
@@ -170,9 +162,17 @@ class SampleCollector:
                 n += 1
                 # 文件名里不能有「:」这类字符（「业务:79续签+10」拉回 Windows 看会出错）
                 safe = re.sub(r'[\/:*?"<>|\s]+', "_", label)
-                name = f"{n:03d}_{safe}_{now:%H%M%S}.{_ext(blob)}"
-                (day_dir / name).write_bytes(blob)
-                rec = {"n": n, "label": label, "file": f"{day_dir.name}/{name}",
+                if label.startswith("业务:"):
+                    rel = ""                     # 业务单不存照片，只留下面的文字记录
+                else:
+                    name = f"{n:03d}_{safe}_{now:%H%M%S}.jpg"
+                    try:
+                        (day_dir / name).write_bytes(masked_jpeg(blob, self._ocr_settings()))
+                        rel = f"{day_dir.name}/{name}"
+                    except Exception:
+                        log.exception("样本涂黑失败，照片不存（只留文字记录）")
+                        rel = ""
+                rec = {"n": n, "label": label, "file": rel,
                        "at": now.strftime("%Y-%m-%d %H:%M:%S"),
                        "chat_type": msg.chat_type,
                        # 水印字段单独抽出来（时间 / 支局 / 工作内容），原文里的数字要抹掉
