@@ -91,6 +91,10 @@ def _checkin_receipt(results) -> str:
             lines.append(f"这张之前已经记过了{when}")
         elif status == "not_watermark":
             lines.append("这张不是今日水印照片，没有记打卡")
+        elif status == "non_activity":
+            lines.append("你不在活动名单里，请核实自己账号信息并重新发送")
+        elif status == "unknown":
+            lines.append("无法查询到您的账号姓名信息，请修改账号信息或打卡照人员信息后重新发送")
         elif status == "no_time":
             lines.append("水印上没认出拍摄时间，没有记打卡，换张清楚的再发")
         else:
@@ -184,6 +188,7 @@ class Pipeline:
         self._excel_last: dict[str, float] = {}  # 单聊要表格的冷却
         self.checkin_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="checkin")
         self.checkin.notify = self._notify_admins          # 视觉模型额度用完 / 换模型时单聊告诉管理员
+        self.checkin.identify = self._checkin_identity     # 多群：只记活动人员的打卡
         self.checkin.start_retry(self.checkin_pool)        # 「待判定」每 10 分钟补判
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="work")
         # 图片单独一个池。OCR 是串行的（引擎不保证线程安全），一张 3~5 秒，
@@ -600,6 +605,26 @@ class Pipeline:
         self.platform.reply(msg, text, None)
 
     # ---------- 单聊打卡 ----------
+
+    def _checkin_identity(self, sender: str, members: str) -> tuple[str, str | None]:
+        """
+        打卡归谁（09-29 用户定）：① 先按发送人账号查名册 —— 活动人员记到他那区；认出来但不是活动人员 → 不记；
+        ② 账号认不出，再按水印「小组成员」找活动人员；③ 都不行 → 不记，让他改账号或照片人员信息后重发。
+        单群模式不管，照旧都记。
+        """
+        if not regions.multi_enabled(self.store):
+            return "ok", None
+        rs = self.rosters
+        rs.maybe_reload()
+        who = rs.identify_sender(sender) if sender else regions.Identity()
+        if who.role == regions.ACTIVITY:
+            return "ok", who.region
+        if who.role == regions.OTHER:
+            return "non_activity", None
+        by_members = rs.identify_members(members)
+        if by_members.role == regions.ACTIVITY:
+            return "ok", by_members.region
+        return "unknown", None
 
     def _handle_p2p_checkin(self, msg: InboundMessage) -> bool:
         """单聊里的照片按正式打卡记，判完回执（带判定，09-28 用户选 B）。"""

@@ -591,6 +591,10 @@ class CheckinRecorder:
         self.pending_dir = DATA / "checkin_pending"
         self._retry_lock = threading.Lock()
         self._pool = None
+        # 多群（09-29）：identify(发送人账号, 水印小组成员) -> ("ok", 区域) / ("non_activity", None) / ("unknown", None)；
+        # 没装就照旧谁发的都记。on_photo(照片, 水印) 每张有水印时间的照片都调一次（支局长人脸点检用）
+        self.identify = None
+        self.on_photo = None
 
     # ---------- 「待判定」补判（09-28） ----------
     # 视觉模型判不了（额度用完、key 失效、网络）的照片，把【涂黑缩小后】送模型的那张图和
@@ -766,18 +770,32 @@ class CheckinRecorder:
         if not wm["stamp"]:
             log.info("水印照片没认出时间，不记打卡")
             return "no_time", None
+        if self.on_photo is not None:
+            try:                        # 支局长人脸点检：谁发的、记不记打卡都要看（09-29 用户定）
+                self.on_photo(blob, wm, photo)
+            except Exception:
+                log.exception("支局长人脸点检出错（不影响打卡）")
         # 企微转发会重压缩，文件指纹对不上 —— 按防伪码再判一次，省得重复调模型
         if self.store.has_key(dedupe_key(wm)):
             log.info("打卡照片重复发送，不重复记（%s）", wm["code"] or wm["stamp"])
             return "dup", wm["stamp"]
 
+        region = ""
+        if self.identify is not None:
+            # 只有活动人员打卡（09-29）：① 发送人账号 ② 认不出再看水印小组成员 ③ 还不行就不记，回一句让他改信息重发
+            status, region = self.identify(sender, wm.get("members", ""))
+            if status != "ok":
+                log.info("打卡没记（%s）| 发送人=%s | 小组成员=%s", status, sender or "?", wm.get("members") or "空")
+                return status, None
+            region = region or ""
         label, color, source, evidence = self.classify(wm, shrunk, items)
         rec = Checkin(at=wm["stamp"], slot=slot_of(wm["stamp"][11:16], s.slots),
                       branch=wm["branch"], members=wm["members"], work=wm["work"],
                       label=label, color=color, source=source, evidence=evidence,
                       photo=photo, msg_id=msg_id,
                       received=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), sender=sender,
-                      code=wm["code"], model=self._judge.last_model if source == "视觉" else "")
+                      code=wm["code"], model=self._judge.last_model if source == "视觉" else "",
+                      region=region)
         if source == "待判定":
             # 存涂黑缩小后的图等补判（09-28 用户同意：最多留 pending_keep_days 天，判出来就删）
             self._save_pending(photo, mask_and_encode(shrunk, items, s.image_max_side),
