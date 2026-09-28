@@ -114,7 +114,7 @@ def test_model_switch_and_pending():
     rec._judge._down.clear()
     fake_vision(rec._judge, {m: "quota" for m in MODELS}, calls)
     r = send(imgs=["w5"])
-    check(r and "类型稍后判定" in r[-1], f"全没额度：先记下、类型稍后判定：{r}")
+    check(r and "类型一时判不出，先按无效打卡处理" in r[-1] and "10 分钟内" in r[-1], f"全没额度：先记下、当无效提醒 10 分钟内重拍：{r}")
     eq(rec.pending_count(), 1, "存了一张待补判")
     meta = json.loads(next((tmp / "checkin_pending").glob("*.json")).read_text(encoding="utf-8"))
     check(all("身份" not in x for x in meta["lines"]), "待补判的文字去掉了敏感行")
