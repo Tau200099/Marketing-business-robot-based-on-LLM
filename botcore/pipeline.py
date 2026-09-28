@@ -220,8 +220,10 @@ class Pipeline:
     def _accept(self, msg: InboundMessage, t0: float) -> None:
         """这里全是微秒级判断，做完立刻把重活丢进线程池。"""
         # 收到就打一行：排查「群里喊了没反应」时先分清是没送到还是被下面的门挡了
+        # 群消息带上群号：多群（城区活动 / 农村活动 / 攻坚群）要靠它分，新群的号也从这里取（09-28）
         log.info("收到消息 | %s | %s | 图%d 文件%d @我=%s 机器人=%s | %s",
-                 msg.chat_type, msg.sender_name or msg.sender_id, len(msg.image_ids or ()),
+                 f"group {msg.chat_id}" if msg.chat_type != "p2p" else msg.chat_type,
+                 msg.sender_name or msg.sender_id, len(msg.image_ids or ()),
                  len(msg.files or ()), msg.mentions_bot, msg.from_bot,
                  redact(msg.text or "")[:40].replace(chr(10), " "))
         if not self.dedupe.is_new(msg.msg_id):
