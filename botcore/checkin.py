@@ -541,6 +541,27 @@ class CheckinStore:
         self._write(payload)
         return True
 
+    def replace(self, old_photo: str, new: "Checkin") -> "Checkin | None":
+        """
+        无效打卡兜底：新的有效照片替换旧的那条无效。留旧的 时间 / 时段（09-29 用户定：用旧的时间），
+        其余（类型、颜色、来源、证据、照片指纹、防伪码……）换成新的。返回替换后的记录；旧的没了返回 None。
+        """
+        with self._lock:
+            rec = next((r for r in self.records if r.photo == old_photo), None)
+            if rec is None:
+                return None
+            self._photos.discard(rec.photo)
+            self._keys.discard(dedupe_key(rec))
+            keep_at, keep_slot = rec.at, rec.slot
+            for f in Checkin.__dataclass_fields__:
+                setattr(rec, f, getattr(new, f))
+            rec.at, rec.slot = keep_at, keep_slot
+            self._photos.add(rec.photo)
+            self._keys.add(dedupe_key(rec))
+            payload = {"records": [asdict(r) for r in self.records]}
+        self._write(payload)
+        return rec
+
     def _write(self, payload: dict) -> None:
         tmp = self.path.with_suffix(".tmp")
         for attempt in (1, 2):
@@ -595,6 +616,33 @@ class CheckinRecorder:
         # 没装就照旧谁发的都记。on_photo(照片, 水印) 每张有水印时间的照片都调一次（支局长人脸点检用）
         self.identify = None
         self.on_photo = None
+        # 无效打卡兜底：发送人 -> [(截止时刻, 那条无效的照片指纹)]；有效的来了替换最近那条（只在内存，重启就没了）
+        self.retry_minutes_invalid = 10
+        self._invalid_windows: dict[str, list[tuple[float, str]]] = {}
+        self._win_lock = threading.Lock()
+
+    def open_window(self, sender: str, photo: str) -> float:
+        """判成无效 / 待判定：给这个人开 10 分钟重拍窗口，返回截止时刻（给回执写「14:50 前」）。"""
+        deadline = time.time() + self.retry_minutes_invalid * 60
+        if sender:
+            with self._win_lock:
+                self._invalid_windows.setdefault(sender, []).append((deadline, photo))
+        return deadline
+
+    def _take_window(self, sender: str) -> str | None:
+        """有效的来了：取这个人最近一条还在窗口里、而且还是无效 / 待判定的那条（补判改成有效了的跳过）。"""
+        if not sender:
+            return None
+        now = time.time()
+        with self._win_lock:
+            wins = [w for w in self._invalid_windows.get(sender, []) if w[0] >= now]
+            self._invalid_windows[sender] = wins
+            while wins:
+                _deadline, photo = wins.pop()
+                old = self.store.find(photo)
+                if old is not None and (old.source == "待判定" or old.label == DISPLAY["无效"]):
+                    return photo
+        return None
 
     # ---------- 「待判定」补判（09-28） ----------
     # 视觉模型判不了（额度用完、key 失效、网络）的照片，把【涂黑缩小后】送模型的那张图和
@@ -800,11 +848,25 @@ class CheckinRecorder:
             # 存涂黑缩小后的图等补判（09-28 用户同意：最多留 pending_keep_days 天，判出来就删）
             self._save_pending(photo, mask_and_encode(shrunk, items, s.image_max_side),
                                [t for _b, t in items], wm["work"])
+        invalid = source == "待判定" or label == DISPLAY["无效"]
+        if not invalid:
+            old_photo = self._take_window(sender)
+            if old_photo:
+                old = self.store.find(old_photo)
+                old_at = old.at if old else ""
+                replaced = self.store.replace(old_photo, rec)
+                if replaced is not None:
+                    self._drop_pending(old_photo)          # 旧的要是待判定，存的图不用再补判了
+                    log.info("打卡替换无效 | %s | 发送人=%s | %s -> %s（%s）", old_at, sender or "?",
+                             DISPLAY["无效"], rec.label, rec.source)
+                    return "replaced", (replaced, old_at)
         if not self.store.add(rec):
             return "dup", rec.at
         log.info("打卡 | %s %s | 发送人=%s | %s %s | 工作内容=%s | %s（%s）%s", rec.at, rec.slot or "时段外",
                  sender or "?", rec.branch or "?", rec.members or "?", rec.work or "空", rec.label,
                  rec.source, f" 证据：{evidence}" if evidence else "")
+        if invalid:
+            return "invalid", (rec, self.open_window(sender, photo))
         return "recorded", rec
 
 

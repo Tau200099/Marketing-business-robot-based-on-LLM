@@ -79,6 +79,24 @@ def _checkin_receipt(results) -> str:
     """单聊打卡的回执，一张一行：「打卡已记：9.28 14:30 下午｜现场拦截」。"""
     lines = []
     for status, info in results or [("error", None)]:
+        if status == "invalid":
+            rec, deadline = info
+            at = rec.at
+            when = f"{int(at[5:7])}.{int(at[8:10])} {at[11:16]}"
+            slot = rec.slot or "21:00 以后，不计入统计"
+            until = datetime.fromtimestamp(deadline).strftime("%H:%M")
+            if rec.source == "待判定":
+                lines.append(f"打卡已记：{when} {slot}｜类型一时判不出，先按无效打卡处理。"
+                             f"请在 10 分钟内（{until} 前）重新拍一张发来，有效的会替换这条")
+            else:
+                lines.append(f"打卡已记：{when} {slot}｜无效打卡。"
+                             f"这张判为无效打卡，请在 10 分钟内（{until} 前）重新拍一张发来，有效的会替换这条")
+            continue
+        if status == "replaced":
+            rec, old_at = info
+            when = f"{int(old_at[5:7])}.{int(old_at[8:10])} {old_at[11:16]}"
+            lines.append(f"打卡已记：{when} {rec.slot or '时段外'}｜{rec.label}（已替换 {old_at[11:16]} 那条无效打卡）")
+            continue
         if status == "recorded":
             at = info.at
             when = f"{int(at[5:7])}.{int(at[8:10])} {at[11:16]}"
