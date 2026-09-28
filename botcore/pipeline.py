@@ -91,6 +91,8 @@ def _checkin_receipt(results) -> str:
             lines.append(f"这张之前已经记过了{when}")
         elif status == "not_watermark":
             lines.append("这张不是今日水印照片，没有记打卡")
+        elif status == "download_failed":
+            lines.append("照片没下载下来，请重发这一张")
         elif status == "non_activity":
             lines.append("你不在活动名单里，请核实自己账号信息并重新发送")
         elif status == "unknown":
@@ -99,6 +101,8 @@ def _checkin_receipt(results) -> str:
             lines.append("水印上没认出拍摄时间，没有记打卡，换张清楚的再发")
         else:
             lines.append("这张没记上，出错了，稍后再发一次")
+    if len(lines) > 1:
+        lines = [f"第{i}张：{t}" for i, t in enumerate(lines, 1)]
     return "\n".join(lines)
 
 
@@ -183,10 +187,13 @@ class Pipeline:
         # 多群（09-29 国庆版）：四张名册 + 支局长名单；config 里配了农村群 / 攻坚群才启用
         self.rosters = regions.RosterSet()
         self._roster_pending: dict[tuple[str, str], tuple[str, float]] = {}   # (会话, 人) -> (哪张名册, 过期)
+        # 单聊照片「收到了还没回执」的：重启时挨个告诉他重发，不悄悄丢（09-29）
+        self._inflight_photos: dict[str, InboundMessage] = {}
+        self._inflight_lock = threading.Lock()
         # 支局长打卡点检（人脸）：每张打卡照都过一遍，认出支局长就记下时间（09-29）
         from .chiefs import ChiefBoard
         self.chief_board = ChiefBoard(self.faces, self.rosters, store)
-        self.checkin.on_photo = self.chief_board.on_photo
+        self.checkin.on_photo = self.chief_board.submit       # 交给人脸队列就返回，和打卡判定同时跑
         self._face_pending: dict[tuple[str, str], tuple[str, str, float]] = {}   # (会话, 人) -> (动作, 姓名, 过期)
         self.checkin_bulletin = None          # bot.py 里挂上（打卡通报）
         self._excel_last: dict[str, float] = {}  # 单聊要表格的冷却
@@ -257,6 +264,9 @@ class Pipeline:
         if msg.chat_type == "group" and settings.require_at and not msg.mentions_bot:
             return
 
+        if msg.chat_type == "p2p" and msg.has_image and msg.msg_id:
+            with self._inflight_lock:
+                self._inflight_photos[msg.msg_id] = msg
         pool = self.ocr_pool if msg.has_image else self.pool
         try:
             pool.submit(self._process, msg, t0)
@@ -268,6 +278,37 @@ class Pipeline:
     # ---------- 重活 ----------
 
     def _process(self, msg: InboundMessage, t0: float) -> None:
+        try:
+            self._process_inner(msg, t0)
+        finally:
+            if not getattr(msg, "_checkin_queued", False):
+                self._done_photo(msg)
+
+    def _done_photo(self, msg: InboundMessage) -> None:
+        with self._inflight_lock:
+            self._inflight_photos.pop(msg.msg_id, None)
+
+    def notify_unfinished(self, timeout: float = 8.0) -> int:
+        """关机前：还没回执的单聊照片，挨个回「请重发」。返回提醒了几条。"""
+        with self._inflight_lock:
+            pending = list(self._inflight_photos.values())
+            self._inflight_photos.clear()
+        deadline = time.time() + timeout
+        n = 0
+        for msg in pending:
+            if time.time() > deadline:
+                log.warning("关机前没来得及提醒的照片消息：%s", msg.msg_id)
+                continue
+            try:
+                self.platform.reply(msg, "机器人正在重启，这条的照片还没处理，请 1 分钟后重新发一次", None)
+                n += 1
+            except Exception:
+                log.exception("关机前提醒重发失败 %s", msg.msg_id)
+        if n:
+            log.warning("关机前提醒了 %d 条单聊照片消息重发", n)
+        return n
+
+    def _process_inner(self, msg: InboundMessage, t0: float) -> None:
         try:
             _settings, matcher = self.store.snapshot()
 
@@ -441,6 +482,18 @@ class Pipeline:
         log.info("活动期外的晒单 / 打卡，不记：%s", redact(text)[:40].replace("\n", " ") or "（图片）")
         self.platform.reply(msg, activity.off_notice(), msg.sender_id or None)
         return True
+
+    def _remind_unknown(self, sender: str, collector: str = "") -> None:
+        """多群：认不出的人晒了单 → 单聊提醒管理员补名册 / 账号对照（同一个账号一天提醒一次）。"""
+        key = (sender or collector, datetime.now().strftime("%Y-%m-%d"))
+        seen = getattr(self, "_unknown_reminded", set())
+        if key in seen:
+            return
+        seen.add(key)
+        self._unknown_reminded = seen
+        who = f"账号「{sender}」" + (f"（揽收人写的「{collector}」）" if collector else "")
+        self._notify_admins(f"{who}晒了单，但四张名册里都查不到这个人：这单先只记进攻坚群总表（按晒单里写的支局）。"
+                            f"请把他补进名册，或在 data/userid_map.json 里加上「账号: 姓名」，补好后自动归类")
 
     def _notify_admins(self, text: str) -> None:
         """单聊发给每个管理员（企微单聊的会话 ID 就是账号 ID）。"""
@@ -692,7 +745,18 @@ class Pipeline:
         if activity.managed() and not activity.is_active():
             self.platform.reply(msg, "现在不在活动期间，打卡没有记录", None)
             return True
-        blobs = [b for b in (self.platform.download_image(msg, i) for i in msg.image_ids) if b]
+        # 一条消息里几张图每张都下；企微偶尔下载失败，重试一次。还失败的在回执里点名是第几张，
+        # 不再悄悄跳过（09-29 用户担心同时发几张会漏）
+        got: list[bytes | None] = []
+        for image_id in msg.image_ids:
+            blob = self.platform.download_image(msg, image_id)
+            if not blob:
+                time.sleep(1)
+                blob = self.platform.download_image(msg, image_id)
+                if not blob:
+                    log.warning("打卡照片下载两次都失败 | %s | %s", msg.sender_id, image_id)
+            got.append(blob)
+        blobs = [b for b in got if b]
         if not blobs:
             self.platform.reply(msg, "照片没下载下来，再发一次", None)
             return True
@@ -702,14 +766,24 @@ class Pipeline:
                 results = fut.result()
             except Exception:
                 log.exception("单聊打卡出错")
-                results = [("error", None)]
+                results = [("error", None)] * len(blobs)
+            it = iter(results)
+            per_image = [next(it, ("error", None)) if b else ("download_failed", None) for b in got]
             try:
-                self.platform.reply(msg, _checkin_receipt(results), None)
+                self.platform.reply(msg, _checkin_receipt(per_image), None)
             except Exception:
                 log.exception("单聊打卡回执没发出去")
 
-        # 和群里的打卡同一个单线程池排队：判定要几秒，回执判完再发
-        self.checkin_pool.submit(self.checkin.record, msg.msg_id, blobs, msg.sender_id).add_done_callback(done)
+        # 和群里的打卡同一个单线程池排队：判定要几秒，回执判完再发（回执发出才从「在途」里划掉）
+        msg._checkin_queued = True
+
+        def done_and_clear(fut) -> None:
+            try:
+                done(fut)
+            finally:
+                self._done_photo(msg)
+        self.checkin_pool.submit(self.checkin.record, msg.msg_id, blobs, msg.sender_id).add_done_callback(
+            done_and_clear)
         return True
 
     # ---------- 单聊取备份 ----------
@@ -1148,6 +1222,8 @@ class Pipeline:
             order.note = (order.note + " 疑似重复，请核对").strip()
 
         if camp.add(order):
+            if getattr(order, "role", "") == regions.UNKNOWN:
+                self._remind_unknown(msg.sender_id, order.collector)
             log.info("已入清单 | %s %s | 揽收人=%s 战区=%s%s",
                      order.kind, order.fee, order.collector,
                      order.team or "未归队",
@@ -1436,7 +1512,12 @@ class Pipeline:
         队列里再排几条，Ctrl+C 之后要等好几分钟才退，用起来像卡死了。
         没做完的活不会丢：下次启动重叠窗会把这些消息重新拉到。
         """
+        # 还没回执的单聊照片先挨个说一声（长连接的消息不会重投，扔了就真没了）
+        try:
+            self.notify_unfinished()
+        except Exception:
+            log.exception("关机前提醒重发出错")
         # cancel_futures：把还没开始跑的任务直接扔掉，不再排队执行
-        for pool in (self.pool, self.ocr_pool):
+        for pool in (self.pool, self.ocr_pool, self.checkin_pool):
             pool.shutdown(wait=False, cancel_futures=True)
         log.info("已取消排队任务，等在途任务收尾（最多 %.0f 秒）", timeout)

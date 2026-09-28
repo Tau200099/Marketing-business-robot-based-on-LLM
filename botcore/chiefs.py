@@ -79,6 +79,10 @@ class ChiefBoard:
         self.path = Path(data_dir) / STORE_FILE
         self._lock = threading.Lock()
         self._data = self._load()
+        # 人脸比对自己一条队列（09-29 用户提议）：打卡那边读完水印就把照片交过来，不等比对完就继续判打卡类型、
+        # 发回执；几个人同时发也是一张张排队比，不会漏。单线程：OpenCV 人脸模型不保证线程安全，2 核机器也够
+        from concurrent.futures import ThreadPoolExecutor
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="chief-face")
 
     # ---------- 存储 ----------
 
@@ -98,6 +102,25 @@ class ChiefBoard:
         tmp.replace(self.path)
 
     # ---------- 每张打卡照 ----------
+
+    def submit(self, blob: bytes, wm: dict, photo: str):
+        """打卡那边调这个：交给人脸队列，马上返回（打卡判定和人脸比对同时跑）。"""
+        def job():
+            try:
+                self.on_photo(blob, wm, photo)
+            except Exception:
+                log.exception("支局长人脸点检出错（%s）", wm.get("stamp"))
+        try:
+            return self._pool.submit(job)
+        except RuntimeError:
+            return None
+
+    def wait_idle(self, timeout: float = 60) -> None:
+        """等队列里的比对都做完（出点检表前、测试用）。"""
+        try:
+            self._pool.submit(lambda: None).result(timeout=timeout)
+        except Exception:
+            pass
 
     def on_photo(self, blob: bytes, wm: dict, photo: str) -> list[str]:
         """CheckinRecorder 每张有水印时间的照片都调。返回认出的支局长（测试用）。"""
@@ -283,6 +306,7 @@ class ChiefBoard:
         if not self.rosters.chiefs.chiefs:
             log.info("还没导支局长名单，点检表不发")
             return True
+        self.wait_idle(30)            # 刚到的几张还在比对：等一下再出表，别漏掉
         day = now.strftime("%Y-%m-%d")
         png = self.render_png(day, now)
         out = DATA / self.store.bulletin_settings().out_dir

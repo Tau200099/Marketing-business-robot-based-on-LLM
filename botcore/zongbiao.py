@@ -210,6 +210,11 @@ def render_png(table: dict) -> bytes:
         d.rectangle([x0, y0, x1, y1], fill=fill, outline=line)
         if text:
             tw = d.textlength(text, font=font)
+            size = font.size
+            while tw > (x1 - x0) - 6 and size > 10:        # 放不下就缩小字（「1400.0%」这种）
+                size -= 1
+                font = _font(size, False)
+                tw = d.textlength(text, font=font)
             d.text((x0 + (x1 - x0 - tw) / 2, y0 + (y1 - y0 - font.size) / 2 - 1), text, font=font, fill=color)
 
     now = table["now"]

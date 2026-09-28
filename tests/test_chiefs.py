@@ -66,7 +66,25 @@ def row(rows, name):
 
 
 def test_hook_installed():
-    check(p.checkin.on_photo == board.on_photo, "打卡照片都过支局长点检")
+    check(p.checkin.on_photo == board.submit, "打卡照片都过支局长点检（交给人脸队列，不等比对完）")
+    import threading
+    started = threading.Event()
+    release = threading.Event()
+    real = board.on_photo
+
+    def slow(blob, wm, photo):
+        started.set()
+        release.wait(5)
+        return real(blob, wm, photo)
+    board.on_photo = slow
+    import time
+    t0 = time.time()
+    board.submit(b"stranger", {"stamp": f"{DAY} 10:00", "work": ""}, "stranger")
+    check(time.time() - t0 < 0.5, "submit 马上返回，不等人脸比对")
+    started.wait(2)
+    release.set()
+    board.wait_idle(10)
+    board.on_photo = real
 
 
 def test_sightings():
