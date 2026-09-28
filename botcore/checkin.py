@@ -118,6 +118,7 @@ class Checkin:
     sender: str = ""        # 发照片的人的企微账号 ID（长连接只给 ID 不给姓名）
     code: str = ""          # 水印防伪码：每张照片唯一，去重用（企微转发会重压缩，文件指纹对不上）
     model: str = ""         # 哪个视觉模型判的（额度用完会自动换模型，留个底）
+    region: str = ""        # 多群：城区 / 农村（按发送人 / 水印小组成员认出来的活动人员所在区；老记录为空 = 城区）
 
 
 # ---------------- 水印 ----------------
@@ -1006,9 +1007,17 @@ def checkin_title(s: CheckinSettings, day: str, campaign_title: str, start: str,
     return f"{span_label(s, day)}日{campaign_title or '营销活动'}过程管控情况（{start}-{end}时段）"
 
 
-def day_sheets(s: CheckinSettings, day: str, campaign_title: str) -> list[tuple[str, str, list[Checkin]]]:
-    """某天按时段的几张表：[(sheet 名, 标题, 记录)]。day = YYYY-MM-DD。"""
-    records = load_records(DATA / s.store_file)
+def of_region(records: list[Checkin], region: str | None) -> list[Checkin]:
+    """多群：只要某个区的打卡。region 为 None 不筛；老记录没有 region 算城区。"""
+    if region is None:
+        return records
+    return [r for r in records if (r.region or "城区") == region]
+
+
+def day_sheets(s: CheckinSettings, day: str, campaign_title: str,
+               region: str | None = None) -> list[tuple[str, str, list[Checkin]]]:
+    """某天按时段的几张表：[(sheet 名, 标题, 记录)]。day = YYYY-MM-DD。region = 城区 / 农村（多群）。"""
+    records = of_region(load_records(DATA / s.store_file), region)
     out = []
     for slot in s.slots:
         name = str(slot.get("name", ""))

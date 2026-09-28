@@ -140,15 +140,23 @@ class CampaignSettings:
     start: str = ""            # YYYY-MM-DD，仅 fixed 时用
     end: str = ""              # YYYY-MM-DD，仅 fixed 时用
     targets: Targets = field(default_factory=Targets)
+    # 农村活动群的目标（09-29 用户：城区农村目标不一样）；没配就用 targets
+    targets_rural: "Targets | None" = None
+
+    def targets_for(self, region: str = "") -> Targets:
+        return self.targets_rural if (region == "农村" and self.targets_rural is not None) else self.targets
 
     @classmethod
     def from_dict(cls, raw: dict | None) -> "CampaignSettings":
         raw = dict(raw or {})
         t = raw.pop("targets", None) or {}
         targets = Targets(**{k: v for k, v in t.items() if k in Targets.__dataclass_fields__})
+        tr = raw.pop("targets_rural", None)
+        targets_rural = (Targets(**{k: v for k, v in tr.items() if k in Targets.__dataclass_fields__})
+                         if isinstance(tr, dict) else None)
         known = {k: str(v).strip() if v is not None else "" for k, v in raw.items()
                  if k in ("title", "rank_period", "ledger_period", "start", "end")}
-        cfg = cls(targets=targets, **known)
+        cfg = cls(targets=targets, targets_rural=targets_rural, **known)
         # start / end 写成 2026/09/11、2026.9.11、9.11 都认；认不出就当没填
         for name in ("start", "end"):
             raw_v = getattr(cfg, name)

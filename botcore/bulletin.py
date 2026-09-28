@@ -291,6 +291,8 @@ class Bulletin:
         self._pending: set[str] = set()      # 欠着补发的群；_load 会从盘上读回来
         self._pending_day = ""                # 欠账是哪天记的：隔天作废，别 00:05 补发一份空排名
         self._fixed_inflight: set[str] = set()   # 正在发的定点通报
+        # 攻坚群：发支局总表 + 支局长打卡点检表（第 5、6 块装上）。签名 (chats, reason) -> {"ok": [...], "failed": [...]}
+        self.hq_publish = None
         self._state = self._load()
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -372,9 +374,31 @@ class Bulletin:
                 else:
                     log.warning("定点通报 %s 没发出去，稍后重试", hhmm)
             try:
-                self._pool.submit(self.publish, chats, f"定点{hhmm}").add_done_callback(done)
+                self._pool.submit(self.publish_all, chats, f"定点{hhmm}").add_done_callback(done)
             except RuntimeError:
                 self._fixed_inflight.discard(hhmm)
+
+    def publish_all(self, chats: tuple[str, ...], reason: str) -> dict:
+        """
+        定点通报：单群模式发 chats；多群模式（09-29）城区活动群发城区的、农村活动群发农村的、
+        攻坚群发支局总表 + 支局长点检表（hq_publish）。有一个群发成功就算这个时刻发过。
+        """
+        from . import regions
+        if not regions.multi_enabled(self.store):
+            return self.publish(chats, reason)
+        total = {"ok": [], "failed": [], "error": ""}
+        for role, region in regions.REGION_OF_ROLE.items():
+            group_chats = regions.role_chats(self.store, role)
+            if group_chats:
+                r = self.publish(group_chats, reason, region)
+                total["ok"] += r.get("ok", [])
+                total["failed"] += r.get("failed", [])
+        hq = regions.role_chats(self.store, "hq")
+        if hq and self.hq_publish is not None:
+            r = self.hq_publish(hq, reason) or {}
+            total["ok"] += r.get("ok", [])
+            total["failed"] += r.get("failed", [])
+        return total
 
     def _mark_sent(self) -> None:
         """
@@ -414,6 +438,9 @@ class Bulletin:
         cfg = self.store.bulletin_settings()
         if not cfg.enabled or not cfg.follow_orders or not chat_id:
             return
+        from . import regions
+        if regions.multi_enabled(self.store):
+            return              # 多群模式每半小时定点通报，跟单通报关掉（09-29 用户定）
         with self._lock:
             if time.time() - self._state.last_follow_at < cfg.min_interval_minutes * 60:
                 self._pending.add(chat_id)
@@ -453,6 +480,22 @@ class Bulletin:
         self._mark_sent()
         self._save()
         log.info("%s，立即通报", text)
+        from . import regions
+        if regions.multi_enabled(self.store):
+            role = regions.group_role(self.store, chat_id)
+            if role == "hq":
+                if self.hq_publish is not None:
+                    try:
+                        self._pool.submit(self.hq_publish, (chat_id,), reason)
+                    except RuntimeError:
+                        pass
+                return True
+            region = regions.REGION_OF_ROLE.get(role)
+            try:
+                self._pool.submit(self.publish, (chat_id,), reason, region)
+            except RuntimeError:
+                pass
+            return True
         self._submit((chat_id,), reason)
         return True
 
@@ -464,14 +507,22 @@ class Bulletin:
         except RuntimeError:
             log.debug("正在退出，放弃通报")
 
-    def build(self, now: datetime | None = None) -> tuple[str, bytes, Path]:
-        """生成 (文字, PNG 字节, Excel 路径)。也给离线测试用。"""
-        now = now or datetime.now()
-        cfg = self.store.bulletin_settings()
+    def _camp(self, region: str | None) -> Campaign:
+        """单群：主台账；多群某区：只读视图（只有这个区活动人员的单、用这个区的活动名册和目标）。"""
         camp_cfg = self.store.campaign_settings()
         camp: Campaign = self._campaign()
         camp.targets = camp_cfg.targets
         camp.refresh_roster()          # TeleAgent 可能刚改过名册
+        if region and getattr(camp, "rosters", None) is not None:
+            return camp.view(region, camp_cfg.targets_for(region))
+        return camp
+
+    def build(self, now: datetime | None = None, region: str | None = None) -> tuple[str, bytes, Path]:
+        """生成 (文字, PNG 字节, Excel 路径)。也给离线测试用。region：多群模式的 城区 / 农村。"""
+        now = now or datetime.now()
+        cfg = self.store.bulletin_settings()
+        camp_cfg = self.store.campaign_settings()
+        camp = self._camp(region)
         # 排名按天、清单按周（campaign.rank_period / ledger_period），两个窗口分开取
         rank = camp_cfg.window("rank", now)
         ledger = camp_cfg.window("ledger", now)
@@ -484,12 +535,13 @@ class Bulletin:
 
         # Excel 每次都生成、落在 reports/（09-14 定的「Excel 不进群，只落 reports」）；
         # 发不发到群里由 with_excel 管
-        xlsx = self.build_excel(now, stem=f"业绩通报_{now:%m%d_%H%M}")
+        tag = ("_" + region) if region else ""
+        xlsx = self.build_excel(now, stem=f"业绩通报{tag}_{now:%m%d_%H%M}", region=region)
         if png:
             xlsx.with_suffix(".png").write_bytes(png)
         return text, png, xlsx
 
-    def build_excel(self, now: datetime | None = None, stem: str = "") -> Path:
+    def build_excel(self, now: datetime | None = None, stem: str = "", region: str | None = None) -> Path:
         """
         晒单 Excel：「晒单数据」+「清单」+ 当天上午 / 下午 / 晚上三张「打卡」表。
         通报和「单聊要表格」用的是同一份；TeleAgent 的 export_report 生成的也是同样的结构。
@@ -497,9 +549,7 @@ class Bulletin:
         now = now or datetime.now()
         cfg = self.store.bulletin_settings()
         camp_cfg = self.store.campaign_settings()
-        camp: Campaign = self._campaign()
-        camp.targets = camp_cfg.targets
-        camp.refresh_roster()
+        camp = self._camp(region)
         rank = camp_cfg.window("rank", now)
         ledger = camp_cfg.window("ledger", now)
         title = summary_title(camp_cfg.period_label("rank", now), camp_cfg.title, now)
@@ -507,11 +557,11 @@ class Bulletin:
         out_dir.mkdir(parents=True, exist_ok=True)
         xlsx = out_dir / f"{stem or f'晒单表格_{now:%m%d_%H%M%S}'}.xlsx"
         ck = self.store.checkin_settings()
-        sheets = day_sheets(ck, now.strftime("%Y-%m-%d"), camp_cfg.title) if ck.enabled else None
+        sheets = day_sheets(ck, now.strftime("%Y-%m-%d"), camp_cfg.title, region) if ck.enabled else None
         return build_workbook(camp, xlsx, title, rank=rank, ledger=ledger,
                               checkin_sheets=sheets, checkin_columns=ck.columns)
 
-    def publish(self, chats: tuple[str, ...], reason: str = "") -> dict:
+    def publish(self, chats: tuple[str, ...], reason: str = "", region: str | None = None) -> dict:
         """
         生成并发送。返回 {"ok": [发成功的群], "failed": [失败的群], "error": 生成失败的原因}，
         调用方（MCP / 助手）按它报成功或失败 —— 以前一律报 ok，群里没收到也显示「已发」。
@@ -519,7 +569,7 @@ class Bulletin:
         cfg = self.store.bulletin_settings()
         result = {"ok": [], "failed": [], "error": ""}
         try:
-            text, png, xlsx = self.build()
+            text, png, xlsx = self.build(region=region)
         except Exception as exc:
             log.exception("生成通报失败（%s）", reason)
             result["error"] = f"生成通报失败：{exc}"

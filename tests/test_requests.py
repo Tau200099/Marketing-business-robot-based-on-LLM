@@ -27,15 +27,25 @@ def send(text, chat="p2p", sender="YangTong"):
 
 
 def test_excel():
-    _r, files = send("晒单表格发我")
-    check(len(files) == 1 and files[0].startswith("晒单") and files[0].endswith(".xlsx"), f"晒单表格：{files}")
-    _r, files = send("打卡表格发我")
-    check(len(files) == 1 and files[0].startswith("打卡"), f"打卡表格：{files}")
-    _r, files = send("表格发我")
-    eq(len(files), 2, "「表格发我」两份都发")
-    r, files = send("晒单表格发我", chat="group")
+    from botcore import regions
+    if not regions.multi_enabled(store):
+        _r, files = send("晒单表格发我")
+        check(len(files) == 1 and files[0].startswith("晒单"), f"晒单表格：{files}")
+        return
+    # 多群模式（09-29）：表格只给管理员；按城区 / 农村分，没说就两个区都发
+    r, files = send("晒单表格发我")
+    check(not files and r and "只有管理员" in r[-1], f"非管理员要表格被拒：{r}")
+    _r, files = send("晒单表格发我", sender=ADMIN)
+    eq(sorted(f.split("_2")[0] for f in files), ["晒单_农村", "晒单_城区"], "没说区域：城区、农村晒单各一份")
+    _r, files = send("城区打卡表格发我", sender=ADMIN)
+    eq([f.split("_2")[0] for f in files], ["打卡_城区"], "城区打卡表格")
+    _r, files = send("农村晒单表格", sender=ADMIN)
+    eq([f.split("_2")[0] for f in files], ["晒单_农村"], "农村晒单表格")
+    _r, files = send("表格发我", sender=ADMIN)
+    eq(len(files), 4, "「表格发我」：两个区 × 晒单 / 打卡")
+    r, files = send("晒单表格发我", chat="group", sender=ADMIN)
     check(not files and r and "单聊" in r[-1], f"群里要表格：不发文件、提示单聊：{r}")
-    r, files = send("今天几单")
+    r, files = send("今天几单", sender=ADMIN)
     eq(files, [], "问业绩不当成要表格")
 
 
@@ -43,14 +53,17 @@ def test_archive_and_prune():
     from botcore import archive
     y = date.today() - timedelta(days=1)
     paths = archive.archive_day(store, y)
-    eq(sorted(p.name for p in paths), sorted([f"晒单_{y}.xlsx", f"打卡_{y}.xlsx"]), "存档昨天两份")
+    want = sorted(f"{archive._name(k, r)}_{y}.xlsx" for k, r in archive.specs(store))
+    eq(sorted(p.name for p in paths), want, "存档昨天的每一张")
     old = date.today() - timedelta(days=20)
-    for kind in archive.KINDS:
-        (archive.ARCHIVE_DIR / kind / f"{kind}_{old}.xlsx").write_bytes(b"x")
+    for k, r in archive.specs(store):
+        path = archive.archive_path(k, old, r)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
     n = archive.prune(14)
-    eq(n, 2, "清掉 14 天前的两份")
-    _r, files = send(f"打卡表格 {y.month}.{y.day}")
-    eq(files, [f"打卡_{y}.xlsx"], "要昨天的打卡表格：给存档那份")
+    eq(n, len(archive.specs(store)), "清掉 14 天前的每一张")
+    _r, files = send(f"城区打卡表格 {y.month}.{y.day}", sender=ADMIN)
+    eq(files, [f"打卡_城区_{y}.xlsx"] if archive.specs(store)[0][1] else [f"打卡_{y}.xlsx"], "要昨天的打卡表格：给存档那份")
 
 
 def test_backup():

@@ -689,12 +689,28 @@ class Pipeline:
         if not hasattr(self.platform, "send_file"):
             self.platform.reply(msg, "这会儿发不了表格，稍后再试", None)
             return True
+        multi = regions.multi_enabled(self.store)
+        if multi and not self._is_admin(msg):
+            self.platform.reply(msg, "表格只有管理员能要", None)       # 09-29 用户定：所有表格只给管理员
+            return True
 
-        want_ck = "打卡" in text
+        want_ck = "打卡" in text and "支局长" not in text
         want_sales = bool(re.search(r"晒单|业绩|清单|台账", text))
         kinds = (["打卡"] if want_ck and not want_sales else
                  ["晒单"] if want_sales and not want_ck else ["晒单", "打卡"])
-        spec = _EXCEL_NOISE.sub("", text).strip() or "today"
+        # 多群：「城区 / 农村」挑区域，没说就两个区都发；「总表」「支局长」是攻坚群那两张
+        wanted: list[tuple[str, str | None]] = []
+        if multi:
+            if "总表" in text:
+                wanted.append(("总表", None))
+            if "支局长" in text or "点检" in text:
+                wanted.append(("支局长", None))
+            if not wanted or want_ck or want_sales:
+                areas = [r for r in regions.REGIONS if r in text] or list(regions.REGIONS)
+                wanted += [(k, a) for a in areas for k in kinds]
+        else:
+            wanted = [(k, None) for k in kinds]
+        spec = _EXCEL_NOISE.sub("", re.sub(r"城区|农村|总表|支局长|点检", "", text)).strip() or "today"
         try:
             _since, until, _label = resolve_period(spec)
         except Exception:
@@ -703,7 +719,7 @@ class Pipeline:
         # 要的是一段（「上周的清单」）就取最后一天，那份的清单是整周的；不超过今天
         day = min(datetime.strptime(until[:10], "%Y-%m-%d").date(), datetime.now().date())
 
-        key = f"{msg.chat_id}|{'+'.join(kinds)}|{day}"
+        key = f"{msg.chat_id}|{wanted}|{day}"
         now = time.time()
         if now - self._excel_last.get(key, 0) < 30:
             log.info("同样的表格 30 秒内要过了，忽略")
@@ -713,15 +729,16 @@ class Pipeline:
         from .archive import get_excel
         camp = self.campaign()
         camp.refresh_roster()
-        for kind in kinds:
+        for kind, area in wanted:
+            label = f"{area or ''}{kind}"
             try:
-                path = get_excel(self.store, camp, kind, day)
+                path = get_excel(self.store, camp, kind, day, area)
             except Exception:
-                log.exception("生成%s表格失败", kind)
-                self.platform.reply(msg, f"{kind}表格生成失败了，稍后再试", None)
+                log.exception("生成%s表格失败", label)
+                self.platform.reply(msg, f"{label}表格生成失败了，稍后再试", None)
                 continue
             if path is None:
-                self.platform.reply(msg, f"没有{kind}表格（{kind}功能没开）", None)
+                self.platform.reply(msg, f"没有{label}表格（这个功能没开）", None)
                 continue
             ok = self.platform.send_file(msg.chat_id, path)
             log.info("%s表格%s -> %s | %s", kind, "已发" if ok else "发送失败", msg.sender_id, path.name)
@@ -1261,6 +1278,8 @@ class Pipeline:
         cfg = self.store.tally_settings()
         if not cfg.enabled or not result["is_new"] or not self._counts(msg):
             return
+        if regions.multi_enabled(self.store) and regions.group_role(self.store, msg.chat_id) == "hq":
+            return              # 战报只在活动群播，攻坚群里的单只点赞（09-29 用户定）
 
         if not branch:
             # 支局没识别出来就不播 —— 播一个没有支局名的战报没意义，
