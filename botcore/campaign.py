@@ -219,6 +219,7 @@ class Order:
     card: int = 0                # 单号卡
     fttr: int = 0                # FTTR
     box: int = 0                 # 云盒/AI视联网/智屏
+    loaded: str = ""             # 晒单「是否加载」里勾了哪几样：云盒,AI,智屏,FTTR（国庆版套包分要分清智屏）
     points: int = 0              # 价值积分
 
     source: str = ""             # 文字晒单 / 图片晒单
@@ -1128,6 +1129,8 @@ def build_order(fields: dict, text: str, msg_id: str = "", at: str = "",
         broadband=d["broadband"], high=d["high"], renew=d["renew"],
         card=card, box=box,
         fttr=1 if fields.get("fttr") else 0,
+        loaded=",".join(n for k, n in (("box", "云盒"), ("ai", "AI"), ("scrn", "智屏"), ("fttr", "FTTR"))
+                        if fields.get(k)),
         points=points,
         source=source, msg_id=msg_id,
         # 号码哈希和单号是「同一单重发」的判据；小组成员是照片时代留下的
