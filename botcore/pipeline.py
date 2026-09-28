@@ -36,6 +36,7 @@ from .llm import LLMJudge, LLMSettings
 from .campaign import (Campaign, NotRosterSheet, Roster, RosterImportError, build_order,
                        has_multiple_orders, looks_like_order, parse_order)
 from .extract import ExtractSettings, FieldExtractor
+from .faces import FaceError, FaceIndex
 from .ledger_tools import resolve_period
 from .paths import DATA
 from .checkin import CheckinRecorder
@@ -172,6 +173,9 @@ class Pipeline:
         # 打卡核验：每张今日水印照片记一次打卡。要调视觉模型（几秒），单独一个线程慢慢做，不耽误点赞
         self.checkin = CheckinRecorder(store.checkin_settings, store.ocr_settings)
         self.samples = SampleCollector(platform, store.ocr_settings, judge=self.checkin.judge_blob)
+        # 人脸识别（只认少数几个人、本人已同意）：管理员单聊录入 / 认人
+        self.faces = FaceIndex()
+        self._face_pending: dict[tuple[str, str], tuple[str, str, float]] = {}   # (会话, 人) -> (动作, 姓名, 过期)
         self.checkin_bulletin = None          # bot.py 里挂上（打卡通报）
         self._excel_last: dict[str, float] = {}  # 单聊要表格的冷却
         self.checkin_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="checkin")
@@ -269,6 +273,10 @@ class Pipeline:
                 return
             # 「晒单表格发一下」「Excel 发我」：单聊直接发文件，群里提示去单聊要
             if self._handle_excel_request(msg):
+                return
+            # 管理员单聊人脸命令：「录入人脸 杨桐」「人脸名单」「删除人脸 杨桐」「认人」（要在样本 / 单聊打卡前面，
+            # 不然录入用的照片会被当成打卡记下）
+            if self._handle_face_command(msg):
                 return
             # 打卡样本：「样本 板夹」+ 照片，只存不点赞不记单
             if self.samples.handle(msg):
@@ -453,6 +461,84 @@ class Pipeline:
             text += f"（{why}）"
         self.platform.reply(msg, text, None)
         return True
+
+    # ---------- 人脸 ----------
+
+    _FACE_ENROLL = re.compile(r"^\s*录入人脸\s*[:：]?\s*(\S{1,12})\s*$")
+    _FACE_DELETE = re.compile(r"^\s*删除人脸\s*[:：]?\s*(\S{1,12})\s*$")
+    _FACE_LIST = re.compile(r"^\s*人脸名单\s*$")
+    _FACE_IDENTIFY = re.compile(r"^\s*认人\s*$")
+    _FACE_PENDING_SECONDS = 120
+
+    def _handle_face_command(self, msg: InboundMessage) -> bool:
+        text = (msg.text or "").strip()
+        key = (msg.chat_id, msg.sender_id)
+        # 先发了「录入人脸 X」/「认人」，这条是跟着来的照片
+        if msg.image_ids and not text and msg.chat_type == "p2p":
+            action, name, until = self._face_pending.get(key, ("", "", 0.0))
+            if action and time.time() <= until:
+                del self._face_pending[key]
+                self._face_act(msg, action, name)
+                return True
+            return False
+        m_enroll, m_delete = self._FACE_ENROLL.match(text), self._FACE_DELETE.match(text)
+        is_list, is_identify = bool(self._FACE_LIST.match(text)), bool(self._FACE_IDENTIFY.match(text))
+        if not (m_enroll or m_delete or is_list or is_identify):
+            return False
+        if msg.chat_type != "p2p":
+            self.platform.reply(msg, "人脸相关的请管理员单聊我", msg.sender_id or None)
+            return True
+        if not self._is_admin(msg):
+            log.warning("非管理员 %s 用人脸命令，已拒绝", msg.sender_id)
+            self.platform.reply(msg, "只有管理员能用人脸功能", None)
+            return True
+        if not self.faces.available():
+            self.platform.reply(msg, "人脸模型没装好，先找管理员装模型", None)
+            return True
+        if is_list:
+            names = self.faces.names()
+            self.platform.reply(msg, ("已录入：" + "、".join(f"{n}（{c} 张）" for n, c in names.items()))
+                                if names else "还没有录入任何人", None)
+            return True
+        if m_delete:
+            name = m_delete.group(1)
+            self.platform.reply(msg, f"已删除{name}的人脸数据" if self.faces.remove(name) else f"没有{name}的人脸数据",
+                                None)
+            return True
+        action, name = ("enroll", m_enroll.group(1)) if m_enroll else ("identify", "")
+        if msg.image_ids:
+            self._face_act(msg, action, name)
+        else:
+            self._face_pending[key] = (action, name, time.time() + self._FACE_PENDING_SECONDS)
+            what = f"{name}的正脸照" if action == "enroll" else "要认的照片"
+            self.platform.reply(msg, f"好，2 分钟内把{what}发过来", None)
+        return True
+
+    def _face_act(self, msg: InboundMessage, action: str, name: str) -> None:
+        blob = next((b for b in (self.platform.download_image(msg, i) for i in msg.image_ids) if b), None)
+        if blob is None:
+            self.platform.reply(msg, "照片没下载下来，再发一次", None)
+            return
+        try:
+            if action == "enroll":
+                ok, text = self.faces.enroll(name, blob, by=msg.sender_id)
+                if ok and name not in self.campaign().roster.people:
+                    text += "（名册里没有这个名字，按你写的录入了）"
+            else:
+                r = self.faces.identify(blob)
+                if not r["faces"]:
+                    text = "照片里没找到人脸"
+                else:
+                    who = "、".join(f"{n}（相似度 {s}）" for n, s in r["matches"]) or "名单上的人一个都没认出"
+                    text = f"照片里 {r['faces']} 张脸。认出：{who}"
+                    if r["unknown"] and r["matches"]:
+                        text += f"；另有 {r['unknown']} 张不在名单上"
+        except FaceError as exc:
+            text = str(exc)
+        except Exception as exc:
+            log.exception("人脸处理出错")
+            text = f"出错了：{exc}"
+        self.platform.reply(msg, text, None)
 
     # ---------- 单聊打卡 ----------
 

@@ -27,3 +27,7 @@ data/
 /VERSION
 checkin_pending/
 /.venv
+
+# 人脸（09-28）：模型文件和录入的人脸特征都不进 git
+/models/
+/faces/
