@@ -267,6 +267,9 @@ class Pipeline:
             # 管理员单聊「新活动 名称 10.1-10.4」「当前活动」「结束活动」
             if self._handle_activity_command(msg):
                 return
+            # 管理员单聊「群号核对」：往 config 里配的每个群发一句群名，核对群号对不对
+            if self._handle_group_check(msg):
+                return
             # 管理员单聊「补判打卡」：马上把「待判定」再判一遍
             if self._handle_retry_command(msg):
                 return
@@ -430,6 +433,34 @@ class Pipeline:
                 send(uid, text)
             except Exception:
                 log.exception("给管理员 %s 发提醒失败", uid)
+
+    def _handle_group_check(self, msg: InboundMessage) -> bool:
+        if (msg.text or "").strip() != "群号核对" or msg.has_image or msg.has_file:
+            return False
+        if msg.chat_type != "p2p":
+            self.platform.reply(msg, "群号核对请管理员单聊我", msg.sender_id or None)
+            return True
+        if not self._is_admin(msg):
+            self.platform.reply(msg, "只有管理员能用群号核对", None)
+            return True
+        groups = self.store.groups()
+        if not groups:
+            self.platform.reply(msg, "config.yaml 里还没配 groups（群号 / 群名）", None)
+            return True
+        ok, bad = [], []
+        for g in groups:
+            sent = False
+            try:
+                sent = bool(self.platform.send_text(g.chat_id, f"【群号核对】这里是「{g.name or '未命名'}」（群号尾号 {g.chat_id[-6:]}）"))
+            except Exception:
+                log.exception("群号核对发到 %s 失败", g.chat_id)
+            (ok if sent else bad).append(g.name or g.chat_id)
+            log.info("群号核对 | %s | %s | %s", g.chat_id, g.name, "已发" if sent else "失败")
+        text = f"已发到 {len(ok)} 个群：{'、'.join(ok)}，去群里看看名字对不对得上"
+        if bad:
+            text += f"；发失败：{'、'.join(bad)}"
+        self.platform.reply(msg, text, None)
+        return True
 
     _RETRY_WORD = re.compile(r"^\s*(?:补判打卡|补判|重判打卡|打卡补判)\s*$")
 

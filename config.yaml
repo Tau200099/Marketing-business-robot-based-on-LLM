@@ -696,3 +696,14 @@ checkin:
 backup:
   admins: [HuangTao]      # 能单聊取备份的人（企微账号 ID）；台账是全员业绩明细，别乱加
   keep_days: 14           # 每日快照留几天
+
+
+# ============================================================
+# 群（09-28 多群改造）：群号 / 群名 / 角色
+#   city  城区支局营销活动群    rural 农村支局营销活动群    hq  綦江分公司秋促营销攻坚群
+# 管理员单聊「群号核对」：机器人往每个群发一句群名，看对不对得上
+# ============================================================
+groups:
+  - {chat_id: wr1VwrLAAAKVBZxVSxAxvFZveoFVjS7Q, name: 城区支局营销活动群, role: city}
+  - {chat_id: wr1VwrLAAAoTxK-Gniez6zqQv23dADQg, name: 农村支局营销活动群, role: rural}
+  - {chat_id: wr1VwrLAAAByVQV_J4zZlZleCh-I8_uA, name: 綦江分公司秋促营销攻坚群, role: hq}

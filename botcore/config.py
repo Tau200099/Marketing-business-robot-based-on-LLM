@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import yaml
@@ -56,6 +56,24 @@ def load_env() -> str:
 
 
 @dataclass
+class GroupInfo:
+    """一个群：群号、群名、角色（city 城区活动群 / rural 农村活动群 / hq 攻坚群）。09-28 多群改造。"""
+    chat_id: str
+    name: str
+    role: str = ""
+
+
+def _parse_groups(raw) -> list:
+    out = []
+    for i, g in enumerate(raw or []):
+        if not isinstance(g, dict) or not str(g.get("chat_id") or "").strip():
+            raise ValueError(f"groups 第 {i + 1} 条要有 chat_id")
+        out.append(GroupInfo(chat_id=str(g["chat_id"]).strip(), name=str(g.get("name") or "").strip(),
+                             role=str(g.get("role") or "").strip()))
+    return out
+
+
+@dataclass
 class Bundle:
     """config.yaml 解析出来的全部设置。加新段就在这里加一个字段。"""
     settings: GlobalSettings
@@ -71,6 +89,7 @@ class Bundle:
     extract: ExtractSettings
     checkin: CheckinSettings
     backup: BackupSettings
+    groups: list = field(default_factory=list)
 
 
 def _as_list(v, where: str) -> list:
@@ -170,7 +189,8 @@ def _build(raw: dict) -> Bundle:
         raise ValueError("config.yaml 里既没有启用的规则，agent 也没开启")
 
     return Bundle(g, Matcher(rules, strategy=g.match_strategy), llm, ocr, tally,
-                  dedupe, stickers, campaign, bulletin, assistant, extract, checkin, backup)
+                  dedupe, stickers, campaign, bulletin, assistant, extract, checkin, backup,
+                  _parse_groups(raw.get("groups")))
 
 
 class ConfigStore:
@@ -257,6 +277,11 @@ class ConfigStore:
     def backup_settings(self) -> BackupSettings:
         with self._lock:
             return self._bundle.backup
+
+    def groups(self) -> list:
+        """config.yaml 的 groups 段：[GroupInfo(chat_id, name, role)]。"""
+        with self._lock:
+            return list(self._bundle.groups)
 
     def maybe_reload(self) -> bool:
         """文件 mtime 变了就重新解析。解析失败保留旧配置，返回 False。"""
