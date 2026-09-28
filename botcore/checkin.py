@@ -694,16 +694,23 @@ class CheckinRecorder:
             return self.retry_pending()
         return self._pool.submit(self.retry_pending).result(timeout=timeout)
 
-    def record(self, msg_id: str, blobs: list[bytes], sender: str = "") -> None:
+    def record(self, msg_id: str, blobs: list[bytes], sender: str = "") -> list[tuple[str, object]]:
+        """
+        每张照片记一次打卡。返回每张的结果（单聊回执用）：
+          ("recorded", Checkin) / ("dup", 水印时间) / ("not_watermark", None) / ("no_time", None) / ("error", None)
+        """
         s = self._settings()
         if not s.enabled:
-            return
+            return []
         self._judge.s = s
+        out = []
         for blob in blobs:
             try:
-                self._one(s, msg_id, blob, sender)
+                out.append(self._one(s, msg_id, blob, sender))
             except Exception:
                 log.exception("打卡记录出错（%s）", msg_id)
+                out.append(("error", None))
+        return out
 
     def read(self, blob: bytes):
         """OCR 读水印。不是今日水印照片返回 None；否则 (水印 dict, 缩过的图, OCR 行)。"""
@@ -745,22 +752,23 @@ class CheckinRecorder:
         label, _color, source, evidence = self.classify(*got)
         return label, evidence or ("工作内容里有业务，按业务算" if source == "业务" else source)
 
-    def _one(self, s: CheckinSettings, msg_id: str, blob: bytes, sender: str = "") -> None:
+    def _one(self, s: CheckinSettings, msg_id: str, blob: bytes, sender: str = "") -> tuple[str, object]:
         photo = hashlib.sha1(blob).hexdigest()[:16]
         if self.store.has_photo(photo):
             log.info("打卡照片重复发送，不重复记（%s）", photo)
-            return
+            old = self.store.find(photo)
+            return "dup", (old.at if old else "")
         got = self.read(blob)
         if got is None:
-            return
+            return "not_watermark", None
         wm, shrunk, items = got
         if not wm["stamp"]:
             log.info("水印照片没认出时间，不记打卡")
-            return
+            return "no_time", None
         # 企微转发会重压缩，文件指纹对不上 —— 按防伪码再判一次，省得重复调模型
         if self.store.has_key(dedupe_key(wm)):
             log.info("打卡照片重复发送，不重复记（%s）", wm["code"] or wm["stamp"])
-            return
+            return "dup", wm["stamp"]
 
         label, color, source, evidence = self.classify(wm, shrunk, items)
         rec = Checkin(at=wm["stamp"], slot=slot_of(wm["stamp"][11:16], s.slots),
@@ -773,10 +781,12 @@ class CheckinRecorder:
             # 存涂黑缩小后的图等补判（09-28 用户同意：最多留 pending_keep_days 天，判出来就删）
             self._save_pending(photo, mask_and_encode(shrunk, items, s.image_max_side),
                                [t for _b, t in items], wm["work"])
-        if self.store.add(rec):
-            log.info("打卡 | %s %s | 发送人=%s | %s %s | 工作内容=%s | %s（%s）%s", rec.at, rec.slot or "时段外",
-                     sender or "?", rec.branch or "?", rec.members or "?", rec.work or "空", rec.label,
-                     rec.source, f" 证据：{evidence}" if evidence else "")
+        if not self.store.add(rec):
+            return "dup", rec.at
+        log.info("打卡 | %s %s | 发送人=%s | %s %s | 工作内容=%s | %s（%s）%s", rec.at, rec.slot or "时段外",
+                 sender or "?", rec.branch or "?", rec.members or "?", rec.work or "空", rec.label,
+                 rec.source, f" 证据：{evidence}" if evidence else "")
+        return "recorded", rec
 
 
 # ---------------- 打卡人 ----------------

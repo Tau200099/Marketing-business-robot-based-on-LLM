@@ -4,7 +4,9 @@
 用法（单聊机器人，或只有自己和机器人的测试群）：
     在输入框里粘贴照片，再打一行「样本 板夹」一起发（图文混排）；
     或者先发「样本 板夹」，2 分钟内再发照片（企微单聊图文分开发时用）。
-    【单聊里】可以省掉「样本」两个字：直接发「现场拦截」「无效打卡」，再发照片（09-24 同事就是这么发的）。
+    【必须带「样本」两个字】：09-28 起单聊发打卡照是正式打卡（手机端群里 @ 不了机器人发图），
+    以前「单聊直接发类型名 / 照片配一句短标注也当样本」的省略写法去掉了 —— 员工随手打一句「现场拦截」
+    再发照片，会被当成样本吞掉、不记打卡。
     回执里带上机器自己的判定：「样本已收 #3 你标：无效 / 机器判：现场拦截（有人坐在床边）」，分歧当场看得见。
 
 类型只认 6 个（2026-09-24 和业务确认）：拦截 / 设备演示 / 板夹 / 算账 / 异网 / 无效，「搬家」按同音错字当「板夹」，
@@ -82,22 +84,6 @@ class SampleCollector:
         text = (msg.text or "").strip()
         m = _TRIGGER.match(text)
         key = (msg.chat_id, msg.sender_id)
-        # 单聊里整条就是一个类型名（「现场拦截」「无效打卡」）也当样本标注
-        bare = text.strip(" 。.，,！!") if msg.chat_type == "p2p" else ""
-        if not m and bare and _normalize(bare) in LABELS:
-            m = re.match(r"(.*)", bare)
-        # 单聊里「照片 + 一句很短的标注」，标注不在 6 类里也存下来，一条都不丢（09-24 同事实际这么发的）：
-        #   业务写法「新增宽带」「79续签+10」-> 标「业务:原文」，拿来考业务优先规则
-        #   规则外的新类型「搬家打卡」     -> 原样当类型，回执里说一声规则里还没有
-        if not m and bare and msg.image_ids and len(bare) <= 12:
-            from .checkin import business_of
-            if business_of(bare) or re.search(r"\d{2,3}", bare):
-                self._save(msg, "业务:" + bare)
-                return True
-            if bare.endswith("打卡"):
-                self._save(msg, bare, unknown=True)
-                return True
-
         if m:
             label = _normalize(m.group(1))
             if label not in LABELS:

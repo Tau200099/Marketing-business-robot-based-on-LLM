@@ -73,6 +73,29 @@ _EXCEL_WORD = re.compile(r"表格|excel|xlsx|清单|台账|报表", re.I)
 _EXCEL_VERB = re.compile(r"发|要|给|导出|来一份|拿")
 
 
+def _checkin_receipt(results) -> str:
+    """单聊打卡的回执，一张一行：「打卡已记：9.28 14:30 下午｜现场拦截」。"""
+    lines = []
+    for status, info in results or [("error", None)]:
+        if status == "recorded":
+            at = info.at
+            when = f"{int(at[5:7])}.{int(at[8:10])} {at[11:16]}"
+            slot = info.slot or "21:00 以后，不计入统计"
+            label = "类型稍后判定" if info.source == "待判定" else info.label
+            lines.append(f"打卡已记：{when} {slot}｜{label}")
+        elif status == "dup":
+            at = str(info or "")
+            when = f"（{int(at[5:7])}.{int(at[8:10])} {at[11:16]}）" if len(at) >= 16 else ""
+            lines.append(f"这张之前已经记过了{when}")
+        elif status == "not_watermark":
+            lines.append("这张不是今日水印照片，没有记打卡")
+        elif status == "no_time":
+            lines.append("水印上没认出拍摄时间，没有记打卡，换张清楚的再发")
+        else:
+            lines.append("这张没记上，出错了，稍后再发一次")
+    return "\n".join(lines)
+
+
 class _Dedupe:
     """
     平台会重推/重复拉到同一条消息，只处理一次。固定容量，O(1)。
@@ -250,6 +273,9 @@ class Pipeline:
             # 打卡样本：「样本 板夹」+ 照片，只存不点赞不记单
             if self.samples.handle(msg):
                 return
+            # 单聊发打卡照 = 正式打卡（09-28：手机端企微在群里 @ 不了机器人发图，改成群里发一份、单聊机器人一份）
+            if self._handle_p2p_checkin(msg):
+                return
             # 文件消息只有一个用途：上传名册 Excel 更新分组
             if msg.has_file:
                 self._handle_file(msg)
@@ -257,6 +283,11 @@ class Pipeline:
 
             # 活动期外群里的晒单、打卡照片：不记、不点赞，回一句（09-28 用户定：活动外不照常）
             if self._off_activity_post(msg):
+                return
+            # 单聊发文字晒单：不记单，提示去群里 @（以前会点赞但不记，容易以为记上了）
+            if msg.chat_type == "p2p" and not msg.has_image and (
+                    parse_order(msg.text or "") or looks_like_order(msg.text or "") >= 3):
+                self.platform.reply(msg, "晒单请在群里@我发，单聊发的不记单", None)
                 return
 
             text, branch, stamp = self._collect_text(msg)
@@ -421,6 +452,35 @@ class Pipeline:
         if r["left"] and why:
             text += f"（{why}）"
         self.platform.reply(msg, text, None)
+        return True
+
+    # ---------- 单聊打卡 ----------
+
+    def _handle_p2p_checkin(self, msg: InboundMessage) -> bool:
+        """单聊里的照片按正式打卡记，判完回执（带判定，09-28 用户选 B）。"""
+        if msg.chat_type != "p2p" or not msg.image_ids or not self.store.checkin_settings().enabled:
+            return False
+        if activity.managed() and not activity.is_active():
+            self.platform.reply(msg, "现在不在活动期间，打卡没有记录", None)
+            return True
+        blobs = [b for b in (self.platform.download_image(msg, i) for i in msg.image_ids) if b]
+        if not blobs:
+            self.platform.reply(msg, "照片没下载下来，再发一次", None)
+            return True
+
+        def done(fut) -> None:
+            try:
+                results = fut.result()
+            except Exception:
+                log.exception("单聊打卡出错")
+                results = [("error", None)]
+            try:
+                self.platform.reply(msg, _checkin_receipt(results), None)
+            except Exception:
+                log.exception("单聊打卡回执没发出去")
+
+        # 和群里的打卡同一个单线程池排队：判定要几秒，回执判完再发
+        self.checkin_pool.submit(self.checkin.record, msg.msg_id, blobs, msg.sender_id).add_done_callback(done)
         return True
 
     # ---------- 单聊取备份 ----------
