@@ -25,3 +25,4 @@ cleanup_*/
 data/
 .temp_*
 /VERSION
+checkin_pending/

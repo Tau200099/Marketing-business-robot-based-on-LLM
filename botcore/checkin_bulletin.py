@@ -168,6 +168,7 @@ class CheckinBulletin:
         self._lock = threading.Lock()
         self._last_command = 0.0
         self._inflight: set[str] = set()          # 正在发的定点，别在它发完之前又提交一次
+        self.recorder = None                      # CheckinRecorder，bot.py 装上：发通报前先补判
         self._stop = threading.Event()
 
     # ---------- 定时 ----------
@@ -261,6 +262,11 @@ class CheckinBulletin:
 
     def publish(self, chats, reason: str, now: datetime) -> dict:
         result = {"ok": [], "failed": []}
+        if self.recorder is not None:
+            try:                    # 发之前把「待判定」补判一遍，表里尽量不留待判定（09-28）
+                self.recorder.retry_now(timeout=180)
+            except Exception:
+                log.exception("通报前补判出错（照常发）")
         try:
             text, png, title = self.build(now)
         except Exception:

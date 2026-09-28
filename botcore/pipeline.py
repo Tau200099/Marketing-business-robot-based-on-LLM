@@ -152,6 +152,8 @@ class Pipeline:
         self.checkin_bulletin = None          # bot.py 里挂上（打卡通报）
         self._excel_last: dict[str, float] = {}  # 单聊要表格的冷却
         self.checkin_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="checkin")
+        self.checkin.notify = self._notify_admins          # 视觉模型额度用完 / 换模型时单聊告诉管理员
+        self.checkin.start_retry(self.checkin_pool)        # 「待判定」每 10 分钟补判
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="work")
         # 图片单独一个池。OCR 是串行的（引擎不保证线程安全），一张 3~5 秒，
         # 有人连发几张就会占满 worker。分开之后纯文字消息不会排在图片后面。
@@ -235,6 +237,9 @@ class Pipeline:
                 return
             # 管理员单聊「新活动 名称 10.1-10.4」「当前活动」「结束活动」
             if self._handle_activity_command(msg):
+                return
+            # 管理员单聊「补判打卡」：马上把「待判定」再判一遍
+            if self._handle_retry_command(msg):
                 return
             # 管理员单聊「备份」「备份 9.25」：发那天的数据备份包
             if self._handle_backup_request(msg):
@@ -372,6 +377,50 @@ class Pipeline:
             return False
         log.info("活动期外的晒单 / 打卡，不记：%s", redact(text)[:40].replace("\n", " ") or "（图片）")
         self.platform.reply(msg, activity.off_notice(), msg.sender_id or None)
+        return True
+
+    def _notify_admins(self, text: str) -> None:
+        """单聊发给每个管理员（企微单聊的会话 ID 就是账号 ID）。"""
+        send = getattr(self.platform, "send_text", None)
+        if send is None:
+            return
+        for uid in self.store.backup_settings().admins or ():
+            try:
+                send(uid, text)
+            except Exception:
+                log.exception("给管理员 %s 发提醒失败", uid)
+
+    _RETRY_WORD = re.compile(r"^\s*(?:补判打卡|补判|重判打卡|打卡补判)\s*$")
+
+    def _handle_retry_command(self, msg: InboundMessage) -> bool:
+        if msg.has_image or msg.has_file or not self._RETRY_WORD.match(msg.text or ""):
+            return False
+        if msg.chat_type != "p2p":
+            self.platform.reply(msg, "补判打卡请管理员单聊我", msg.sender_id or None)
+            return True
+        if not self._is_admin(msg):
+            self.platform.reply(msg, "只有管理员能补判打卡", None)
+            return True
+        n = self.checkin.pending_count()
+        if not n:
+            self.platform.reply(msg, "没有待判定的打卡", None)
+            return True
+        self.platform.reply(msg, f"有 {n} 张待判定，开始补判……", None)
+        try:
+            r = self.checkin.retry_now(timeout=600)
+        except Exception as exc:
+            log.exception("补判打卡出错")
+            self.platform.reply(msg, f"补判出错了：{exc}", None)
+            return True
+        why = {"nokey": "没配视觉模型的 key", "auth": "视觉模型的 key 不能用了",
+               "quota_all": "视觉模型额度全用完了", "budget": "每分钟调用次数满了，过会儿再试",
+               "正在补判": "后台正在补判，稍后再看"}.get(r["reason"], "")
+        text = f"补判完成：判出 {r['done']} 张，还有 {r['left']} 张待判定"
+        if r["dropped"]:
+            text += f"，{r['dropped']} 张超过 3 天已放弃"
+        if r["left"] and why:
+            text += f"（{why}）"
+        self.platform.reply(msg, text, None)
         return True
 
     # ---------- 单聊取备份 ----------

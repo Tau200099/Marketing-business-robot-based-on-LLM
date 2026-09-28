@@ -45,7 +45,7 @@ import re
 import threading
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import requests
@@ -95,6 +95,10 @@ class CheckinSettings:
     vision_api_key_env: str = "VISION_API_KEY"
     vision_timeout: float = 30.0
     vision_max_calls_per_minute: int = 20
+    # 当前模型免费额度用完 / 没开通时按顺序换下一个（09-28 用户定：不用测，额度用完直接换）
+    vision_fallback_models: list = field(default_factory=lambda: ["qwen3-vl-flash", "qwen-vl-plus"])
+    pending_keep_days: int = 3        # 「待判定」的照片（涂黑缩小后的）最多留几天等补判
+    retry_minutes: int = 10           # 每隔几分钟补判一次「待判定」
 
 
 @dataclass
@@ -113,6 +117,7 @@ class Checkin:
     received: str = ""
     sender: str = ""        # 发照片的人的企微账号 ID（长连接只给 ID 不给姓名）
     code: str = ""          # 水印防伪码：每张照片唯一，去重用（企微转发会重压缩，文件指纹对不上）
+    model: str = ""         # 哪个视觉模型判的（额度用完会自动换模型，留个底）
 
 
 # ---------------- 水印 ----------------
@@ -323,11 +328,41 @@ def mask_and_encode(shrunk: bytes, items: list, max_side: int) -> bytes:
 
 
 class VisionJudge:
+    DOWN_HOURS = 6       # 额度用完的模型歇多久再试（充值 / 换 key 后能自己回到主模型）
+
     def __init__(self, s: CheckinSettings) -> None:
         self.s = s
         self._session = requests.Session()
         self._lock = threading.Lock()
         self._window, self._calls = 0.0, 0
+        self._down: dict[str, float] = {}      # 模型 -> 到什么时候之前别再试（额度用完 / 没开通）
+        self._alerted: dict[str, float] = {}   # 提醒种类 -> 上次提醒时刻，同一种 6 小时最多一次
+        self.notify = None                     # 给管理员发单聊的函数，pipeline 装上
+        self.last_model = ""
+        self.last_error = ""                   # ok / nokey / budget / auth / quota_all / fail
+
+    def _alert(self, kind: str, text: str) -> None:
+        now = time.monotonic()
+        with self._lock:
+            if now - self._alerted.get(kind, -1e9) < self.DOWN_HOURS * 3600:
+                return
+            self._alerted[kind] = now
+        log.warning("视觉模型提醒：%s", text)
+        if self.notify is not None:
+            try:
+                self.notify(text)
+            except Exception:
+                log.exception("给管理员发视觉模型提醒失败")
+
+    def models(self) -> list[str]:
+        """主模型 + 备用模型，去掉正在歇着的。"""
+        now = time.monotonic()
+        out = []
+        for m in [self.s.vision_model, *(self.s.vision_fallback_models or ())]:
+            m = str(m).strip()
+            if m and m not in out and self._down.get(m, 0) <= now:
+                out.append(m)
+        return out
 
     def _budget(self) -> bool:
         limit = self.s.vision_max_calls_per_minute
@@ -343,65 +378,112 @@ class VisionJudge:
             return True
 
     def judge(self, jpeg: bytes) -> tuple[str, str, str, bool] | None:
-        """返回 (类别, 证据, 地点, 有没有板夹摆给客户看)；没配 key / 超限 / 出错返回 None。"""
+        """
+        返回 (类别, 证据, 地点, 有没有板夹摆给客户看)；判不了返回 None（原因在 last_error）。
+        主模型额度用完 / 没开通就按顺序换备用模型，并单聊提醒管理员；全用完了也提醒。
+        """
         key = os.getenv(self.s.vision_api_key_env, "").strip()
         if not key:
-            log.warning("没配 %s，打卡照片记「待判定」", self.s.vision_api_key_env)
+            self.last_error = "nokey"
+            self._alert("nokey", f"没配视觉模型的 key（{self.s.vision_api_key_env}），打卡先记「待判定」，配好后会自动补判")
             return None
         if not self._budget():
+            self.last_error = "budget"
             log.warning("视觉模型每分钟 %d 次已满，这张记「待判定」", self.s.vision_max_calls_per_minute)
             return None
-        body = {"model": self.s.vision_model, "temperature": 0, "max_tokens": 120,
+        primary = str(self.s.vision_model).strip()
+        tried = []
+        for model in self.models():
+            tried.append(model)
+            kind, got = self._call(model, key, jpeg)
+            if kind == "ok":
+                self.last_model, self.last_error = model, "ok"
+                if model != primary:
+                    self._alert(f"switch:{model}", f"视觉模型 {primary} 额度用完或没开通，已自动换成 {model} 继续判打卡")
+                return got
+            if kind == "quota":
+                self._down[model] = time.monotonic() + self.DOWN_HOURS * 3600
+                log.warning("视觉模型 %s 额度用完 / 没开通，%d 小时内换别的模型：%s", model, self.DOWN_HOURS, got)
+                continue
+            if kind == "auth":
+                self.last_error = "auth"
+                self._alert("auth", f"视觉模型的 key 不能用了（{got}），打卡先记「待判定」，换好 key 重启后会自动补判")
+                return None
+            self.last_error = "fail"            # 网络抖动、返回格式不对：这张先待判定，过会儿补判
+            return None
+        self.last_error = "quota_all"
+        self._alert("quota_all", "视觉模型额度全用完了（" + "、".join(
+            [primary, *[str(m) for m in (self.s.vision_fallback_models or ())]]) +
+            "），打卡先记「待判定」。换 key 或者在百炼关掉「只用免费额度」后会自动补判")
+        return None
+
+    _RATE_LIMIT = re.compile(r"Throttling|RateQuota|rate limit", re.I)
+    _NO_QUOTA = re.compile(r"quota|FreeTier|Arrearage|access_denied|AccessDenied|not.?exist|Unpurchased", re.I)
+
+    def _call(self, model: str, key: str, jpeg: bytes):
+        """调一个模型。返回 ("ok", 结果) / ("quota", 原因) / ("auth", 原因) / ("fail", 原因)。"""
+        body = {"model": model, "temperature": 0, "max_tokens": 120,
                 "messages": [{"role": "user", "content": [
                     {"type": "image_url",
                      "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()}},
                     {"type": "text", "text": PROMPT}]}]}
+        why = ""
         for attempt in (1, 2):
             try:
                 r = self._session.post(f"{self.s.vision_base_url.rstrip('/')}/chat/completions",
                                        headers={"Authorization": f"Bearer {key}"},
                                        json=body, timeout=self.s.vision_timeout)
+                if r.status_code == 401:
+                    return "auth", f"HTTP 401 {r.text[:80]}"
+                if r.status_code in (400, 403, 404) and not self._RATE_LIMIT.search(r.text) \
+                        and self._NO_QUOTA.search(r.text):
+                    return "quota", f"HTTP {r.status_code} {r.text[:120]}"
                 if r.status_code != 200:
                     raise RuntimeError(f"HTTP {r.status_code}: {r.text[:160]}")
                 txt = r.json()["choices"][0]["message"]["content"]
-                data = json.loads(txt[txt.find("{"): txt.rfind("}") + 1])
-                label = str(data.get("label") or "").strip()
-                if label not in DISPLAY:
-                    raise RuntimeError(f"类别不认识：{label!r}")
-                # 自相矛盾时按「有没有人」这一步为准：说有人却判无效 -> 拦截；说没人却判了别的 -> 无效
-                people = data.get("people")
-                if people is True and label == "无效":
-                    label = "拦截"
-                place = str(data.get("place") or "").strip()
-                tv = str(data.get("tv") or "").strip()
-                if people is False and label in ("拦截", "板夹", "设备演示") and not (
-                        label == "设备演示" and tv == "云盒菜单"):
-                    # 这三类得有客户在；异网 / 算账可以是手机屏幕特写，没人也算；
-                    # 云盒菜单特写没人也算演示（09-28 #99，用户：拍到云盒菜单就算）
-                    label = "无效"
-                installing = data.get("installing") is True or str(data.get("installing")).lower() == "true"
-                folder = data.get("folder") is True or str(data.get("folder")).lower() == "true"
-                evidence = str(data.get("evidence") or "")[:40]
-                if "监控" in evidence:
-                    tv = "普通节目"     # 监控多格画面会被认成云盒菜单（09-28 #75）
-                talking = not (data.get("talking") is False or str(data.get("talking")).lower() == "false")
-                if place == "摊位":
-                    # 摊位上一律算拦截：桌上摆着资料设备也是、没拍到正在说话也是（09-24 同事的标法）
-                    if label in ("板夹", "设备演示", "无效") and people is not False:
-                        label = "拦截"
-                    return label, evidence, place, folder
-                # 摊位以外，有人但没有有效展示时：入户 / 办公室 = 无效；别处有人交谈 = 拦截，没人交谈 = 无效
-                # （09-24 用户：有人说话就算拦截；入户客户在场没展示算无效）
-                fallback = "拦截" if (talking and place not in _INDOOR) else "无效"
-                if label == "设备演示" and (installing or tv == "普通节目"):
-                    label = fallback        # 装机接线、电视播普通节目都不是设备演示
-                elif label == "拦截" and (place in _INDOOR or not talking):
-                    label = "无效"
-                # refine 里「算账没证据」按同一口径退：没人交谈就当入户处理（退无效）
-                return label, evidence, (place if talking else "入户"), folder
+                return "ok", self._interpret(json.loads(txt[txt.find("{"): txt.rfind("}") + 1]))
             except Exception as exc:
-                log.warning("视觉模型第 %d 次调用失败：%s", attempt, exc)
-        return None
+                why = str(exc)[:160]
+                log.warning("视觉模型 %s 第 %d 次调用失败：%s", model, attempt, exc)
+        return "fail", why
+
+    @staticmethod
+    def _interpret(data: dict) -> tuple[str, str, str, bool]:
+        """模型的 JSON -> (类别, 证据, 地点, 有没有板夹)，带上本机的一致性兜底。"""
+        label = str(data.get("label") or "").strip()
+        if label not in DISPLAY:
+            raise RuntimeError(f"类别不认识：{label!r}")
+        # 自相矛盾时按「有没有人」这一步为准：说有人却判无效 -> 拦截；说没人却判了别的 -> 无效
+        people = data.get("people")
+        if people is True and label == "无效":
+            label = "拦截"
+        place = str(data.get("place") or "").strip()
+        tv = str(data.get("tv") or "").strip()
+        if people is False and label in ("拦截", "板夹", "设备演示") and not (
+                label == "设备演示" and tv == "云盒菜单"):
+            # 这三类得有客户在；异网 / 算账可以是手机屏幕特写，没人也算；
+            # 云盒菜单特写没人也算演示（09-28 #99，用户：拍到云盒菜单就算）
+            label = "无效"
+        installing = data.get("installing") is True or str(data.get("installing")).lower() == "true"
+        folder = data.get("folder") is True or str(data.get("folder")).lower() == "true"
+        evidence = str(data.get("evidence") or "")[:40]
+        if "监控" in evidence:
+            tv = "普通节目"     # 监控多格画面会被认成云盒菜单（09-28 #75）
+        talking = not (data.get("talking") is False or str(data.get("talking")).lower() == "false")
+        if place == "摊位":
+            # 摊位上一律算拦截：桌上摆着资料设备也是、没拍到正在说话也是（09-24 同事的标法）
+            if label in ("板夹", "设备演示", "无效") and people is not False:
+                label = "拦截"
+            return label, evidence, place, folder
+        # 摊位以外，有人但没有有效展示时：入户 / 办公室 = 无效；别处有人交谈 = 拦截，没人交谈 = 无效
+        # （09-24 用户：有人说话就算拦截；入户客户在场没展示算无效）
+        fallback = "拦截" if (talking and place not in _INDOOR) else "无效"
+        if label == "设备演示" and (installing or tv == "普通节目"):
+            label = fallback        # 装机接线、电视播普通节目都不是设备演示
+        elif label == "拦截" and (place in _INDOOR or not talking):
+            label = "无效"
+        # refine 里「算账没证据」按同一口径退：没人交谈就当入户处理（退无效）
+        return label, evidence, (place if talking else "入户"), folder
 
 
 # ---------------- 存储 ----------------
@@ -433,6 +515,26 @@ class CheckinStore:
             self._photos.add(rec.photo)
             self._keys.add(key)
             payload = {"records": [asdict(r) for r in self.records]}
+        self._write(payload)
+        return True
+
+    def find(self, photo: str) -> Checkin | None:
+        with self._lock:
+            return next((r for r in self.records if r.photo == photo), None)
+
+    def update(self, photo: str, **fields) -> bool:
+        """补判用：按照片指纹改一条记录。"""
+        with self._lock:
+            rec = next((r for r in self.records if r.photo == photo), None)
+            if rec is None:
+                return False
+            for k, v in fields.items():
+                setattr(rec, k, v)
+            payload = {"records": [asdict(r) for r in self.records]}
+        self._write(payload)
+        return True
+
+    def _write(self, payload: dict) -> None:
         tmp = self.path.with_suffix(".tmp")
         for attempt in (1, 2):
             try:
@@ -444,7 +546,6 @@ class CheckinStore:
                 if attempt == 2:
                     log.error("打卡记录写不进去（内存里还在）：%s", exc)
                 time.sleep(1)
-        return True
 
 
 def dedupe_key(rec) -> str:
@@ -480,6 +581,112 @@ class CheckinRecorder:
         s = settings_getter()
         self.store = CheckinStore(DATA / s.store_file)
         self._judge = VisionJudge(s)
+        self.pending_dir = DATA / "checkin_pending"
+        self._retry_lock = threading.Lock()
+        self._pool = None
+
+    # ---------- 「待判定」补判（09-28） ----------
+    # 视觉模型判不了（额度用完、key 失效、网络）的照片，把【涂黑缩小后】送模型的那张图和
+    # 本机 OCR 读到的画面文字（敏感行去掉）存到 data/checkin_pending/，定时再判；
+    # 判出来就改记录、删图；留满 pending_keep_days 天还判不了就删图放弃（记录保持待判定）
+
+    @property
+    def notify(self):
+        return self._judge.notify
+
+    @notify.setter
+    def notify(self, fn) -> None:
+        self._judge.notify = fn
+
+    def _save_pending(self, photo: str, jpeg: bytes, lines: list[str], work: str) -> None:
+        try:
+            self.pending_dir.mkdir(parents=True, exist_ok=True)
+            (self.pending_dir / f"{photo}.jpg").write_bytes(jpeg)
+            meta = {"work": work, "lines": [t for t in lines if not _SENSITIVE.search(t)],
+                    "created": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+            (self.pending_dir / f"{photo}.json").write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            log.exception("待判定照片没存下来（这张以后补判不了）")
+
+    def _drop_pending(self, photo: str) -> None:
+        for ext in (".jpg", ".json"):
+            try:
+                (self.pending_dir / f"{photo}{ext}").unlink()
+            except FileNotFoundError:
+                pass
+
+    def pending_count(self) -> int:
+        return len(list(self.pending_dir.glob("*.json"))) if self.pending_dir.is_dir() else 0
+
+    def retry_pending(self) -> dict:
+        """把存着的「待判定」再判一遍。返回 {done, left, dropped, reason}。同一时间只跑一个。"""
+        out = {"done": 0, "left": 0, "dropped": 0, "reason": ""}
+        if not self._retry_lock.acquire(blocking=False):
+            out["left"] = self.pending_count()
+            out["reason"] = "正在补判"
+            return out
+        try:
+            s = self._settings()
+            self._judge.s = s
+            cutoff = datetime.now() - timedelta(days=s.pending_keep_days)
+            for meta_path in sorted(self.pending_dir.glob("*.json")) if self.pending_dir.is_dir() else ():
+                photo = meta_path.stem
+                rec = self.store.find(photo)
+                jpg = meta_path.with_suffix(".jpg")
+                if rec is None or rec.source != "待判定" or not jpg.is_file():
+                    self._drop_pending(photo)
+                    continue
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                    created = datetime.strptime(meta.get("created", ""), "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    meta, created = {}, datetime.now()
+                if created < cutoff:
+                    log.warning("打卡 %s（%s）%d 天都没判出来，放弃补判，照片已删", rec.at, rec.branch, s.pending_keep_days)
+                    self._drop_pending(photo)
+                    out["dropped"] += 1
+                    continue
+                label, color, source, evidence = self._vision(meta.get("work", ""), jpg.read_bytes(),
+                                                              meta.get("lines") or [])
+                if source == "待判定":
+                    if self._judge.last_error in ("nokey", "auth", "quota_all", "budget"):
+                        out["reason"] = self._judge.last_error
+                        break           # 整体判不了（没额度 / key 坏 / 限流），别一张张白试
+                    continue
+                self.store.update(photo, label=label, color=color, source=source, evidence=evidence,
+                                  model=self._judge.last_model)
+                self._drop_pending(photo)
+                out["done"] += 1
+                log.info("补判打卡 | %s %s %s | %s（%s）", rec.at, rec.branch, rec.members, label, evidence)
+        finally:
+            self._retry_lock.release()
+        out["left"] = self.pending_count()
+        if out["done"] or out["dropped"]:
+            log.info("补判打卡：判出 %d 张，放弃 %d 张，还剩 %d 张", out["done"], out["dropped"], out["left"])
+        return out
+
+    def start_retry(self, pool) -> None:
+        """后台每 retry_minutes 分钟补判一次（交给打卡的单线程池，和新照片排队，不会同时写记录）。"""
+        self._pool = pool
+
+        def loop() -> None:
+            while True:
+                time.sleep(max(1, int(self._settings().retry_minutes)) * 60)
+                try:
+                    if self.pending_count():
+                        pool.submit(self.retry_pending)
+                except Exception:
+                    log.exception("提交补判出错")
+
+        threading.Thread(target=loop, name="checkin-retry", daemon=True).start()
+
+    def retry_now(self, timeout: float = 300) -> dict:
+        """马上补判并等结果（打卡通报前、管理员「补判打卡」）。没有待判定就直接返回。"""
+        if not self.pending_count():
+            return {"done": 0, "left": 0, "dropped": 0, "reason": ""}
+        if self._pool is None:
+            return self.retry_pending()
+        return self._pool.submit(self.retry_pending).result(timeout=timeout)
 
     def record(self, msg_id: str, blobs: list[bytes], sender: str = "") -> None:
         s = self._settings()
@@ -507,17 +714,21 @@ class CheckinRecorder:
         ruled = rule_label(wm["work"], s.keep_as_is)
         if ruled:
             return (*ruled, "")
-        got = self._judge.judge(mask_and_encode(shrunk, items, s.image_max_side))
+        return self._vision(wm["work"], mask_and_encode(shrunk, items, s.image_max_side), [t for _b, t in items])
+
+    def _vision(self, work: str, jpeg: bytes, lines: list[str]) -> tuple[str, str, str, str]:
+        """视觉模型判 + 本机兜底。jpeg 是已经涂黑缩小的图，lines 是 OCR 读到的每一行。"""
+        got = self._judge.judge(jpeg)
         if not got:
             return "待判定", "", "待判定", ""
         cls, evidence, place, folder = got
-        if place == "店铺" and "上门" in wm["work"] and "拦截" not in wm["work"]:
+        if place == "店铺" and "上门" in work and "拦截" not in work:
             # 上门去店里找老板 = 入户：只聊天没展示算无效（09-28 用户定，#77 #79 #102）；
             # 店里拦路人（工作内容写拦截）不受影响
             place = "入户"
             if cls == "拦截":
                 cls, evidence = "无效", (evidence + "；上门进店没展示东西按无效")[:40]
-        cls, evidence = refine(cls, evidence, [t for _b, t in items], place=place, folder=folder)
+        cls, evidence = refine(cls, evidence, lines, place=place, folder=folder)
         return DISPLAY[cls], (RED if cls == "无效" else ""), "视觉", evidence
 
     def judge_blob(self, blob: bytes) -> tuple[str, str] | None:
@@ -551,7 +762,11 @@ class CheckinRecorder:
                       label=label, color=color, source=source, evidence=evidence,
                       photo=photo, msg_id=msg_id,
                       received=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), sender=sender,
-                      code=wm["code"])
+                      code=wm["code"], model=self._judge.last_model if source == "视觉" else "")
+        if source == "待判定":
+            # 存涂黑缩小后的图等补判（09-28 用户同意：最多留 pending_keep_days 天，判出来就删）
+            self._save_pending(photo, mask_and_encode(shrunk, items, s.image_max_side),
+                               [t for _b, t in items], wm["work"])
         if self.store.add(rec):
             log.info("打卡 | %s %s | 发送人=%s | %s %s | 工作内容=%s | %s（%s）%s", rec.at, rec.slot or "时段外",
                      sender or "?", rec.branch or "?", rec.members or "?", rec.work or "空", rec.label,

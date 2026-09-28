@@ -151,6 +151,7 @@ def main() -> None:
     bulletin.start()
     # 打卡通报：18:00 前每小时、18:00 后每一个半小时，发「文字 + 打卡表图」；群里喊「打卡通报」立刻发
     checkin_bulletin = CheckinBulletin(platform, store, pipeline.campaign, pipeline.pool)
+    checkin_bulletin.recorder = pipeline.checkin
     pipeline.checkin_bulletin = checkin_bulletin
     checkin_bulletin.start()
 
