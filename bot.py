@@ -154,6 +154,11 @@ def main() -> None:
     checkin_bulletin.recorder = pipeline.checkin
     pipeline.checkin_bulletin = checkin_bulletin
     checkin_bulletin.start()
+    # 攻坚群（多群模式）：定点 / 喊「通报」发支局总表 + 支局长打卡点检表；喊「打卡通报」只发点检表
+    from botcore.hq import HqPublisher
+    hq = HqPublisher(platform, store, pipeline.campaign, getattr(pipeline, "chief_board", None))
+    bulletin.hq_publish = hq.publish
+    checkin_bulletin.hq_command = hq.publish_chiefs
 
     # deploy/push.sh 部署时写的版本号（git 提交），看日志就知道服务器跑的是哪一版
     try:
