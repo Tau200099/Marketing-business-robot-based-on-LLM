@@ -184,6 +184,9 @@ def _sub_bbs(fee: str) -> list[bool]:
     return out
 
 
+sub_broadbands = _sub_bbs          # 晒单解析（活动群战报 / 通报）也按这个数副宽的千五
+
+
 _SUB_BB_TEXT = re.compile(r"(?:(?<![\d.])\d{2}\s*元\s*(?:的\s*)?)?副宽\s*(?:\d{2,3}(?![\d.]))?")
 
 
@@ -267,9 +270,19 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
         return k
 
     if kind == "存量":
+        # 存量带副宽（09-29 用户定）：副宽是新开的一条宽带 —— 算新增宽带，60 元（500M）另记千五；
+        # 副宽的钱不算进主宽带的迁转 / 提值（下面只看去掉副宽后的「主宽带」那段）
+        k.broadband = float(len(subs))
+        sub_giga = float(sum(subs))
+        main = _SUB_BB_TEXT.sub(" ", money) if subs else money
+        up = _tier_up(main)
+        mnums = _NUMF.findall(main)
+        mfirst = int(float(mnums[0])) if mnums else 0
+        before_tier = mfirst if mfirst >= MIN_TIER else 0
+        after_tier = int(up.group(2)) if up else before_tier
+        after_text = main[up.start(2):] if up else main
         # 迁转前后的宽带档位和总和（总和 = 写出来的档位 + 加装钱 − 返费）
-        before_tier, after_tier = base, after_base
-        before_total = _total(money[:up.start(2)]) if up else float(base)
+        before_total = _total(main[:up.start(2)]) if up else float(before_tier)
         after_total = _total(after_text)
         sp = _SPEED_UP.search(fee)
 
@@ -280,13 +293,14 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
             is_2000 = (bool(sp) and _speed_value(sp.group("to")) >= 2000) or (after_tier >= TIER_2000M and not solo)
         if is_2000:
             if up:
-                k.giga = 1.5 if after_total > before_total else (1.2 if after_total == before_total else 1.1)
+                g = 1.5 if after_total > before_total else (1.2 if after_total == before_total else 1.1)
             elif after_total > before_total or re.search(r"高迁|提值", fee):
-                k.giga = 1.5                       # 「299续约加10元云盒」：总和变高 = 高迁
+                g = 1.5                            # 「299续约加10元云盒」：总和变高 = 高迁
             elif re.search(r"降档|负迁|低签", fee):
-                k.giga = 1.1
+                g = 1.1
             else:
-                k.giga = 1.2                       # 「299续约」：平签
+                g = 1.2                            # 「299续约」：平签
+            k.giga = g + sub_giga
             return k
 
         # ---- 其他：速率升档 且 提值 ≥10 ----
@@ -301,8 +315,8 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
             upgraded = after_speed > _speed_of(before_tier, solo)
             if not upgraded and _SPEED_HINT.search(fee):
                 k.notes.append("写了提速 / 高迁，没写升到多少兆，千五待核对")
-        if upgraded and after_speed >= GIGA_SPEED and after_total - before_total >= GIGA_LIFT:
-            k.giga = 1.0
+        main_giga = 1.0 if upgraded and after_speed >= GIGA_SPEED and after_total - before_total >= GIGA_LIFT else 0.0
+        k.giga = main_giga + sub_giga
         return k
 
     k.notes.append(f"业务类型「{kind}」认不出，五项都记 0")

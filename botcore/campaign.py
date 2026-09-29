@@ -594,6 +594,9 @@ def derive(kind: str, fee: str) -> dict:
         if kind != "存量":
             out["kind"] = "新增"
             out["broadband"] = 1
+        elif _SUB_BB.search(fee):
+            # 存量单办副宽：副宽是新开的一条宽带，算新增宽带（09-29 用户定）
+            out["broadband"] = len(_SUB_BB.findall(fee))
         out["points"] = final + addon
         out["solo"] = True
         out["solo_giga"] = final in SOLO_GIGA_TIERS
@@ -618,6 +621,8 @@ def derive(kind: str, fee: str) -> dict:
         #   没写原档的高迁 / 提值   长续约 1，积分待核对
         #   没有档位数字的（云盒、+10） 纯加装：长续约 0，积分 = 附加
         lift = _LIFT.search(fee)
+        # 存量带副宽：每个副宽是新开的一条宽带，算新增宽带（09-29 用户定）；续约本身照下面算
+        out["broadband"] = len(_SUB_BB.findall(fee))
         if up:
             before = _part_total(fee[:up.start(2)])
             after = _part_total(fee[up.start(2):])
@@ -1251,7 +1256,8 @@ def build_order(fields: dict, text: str, msg_id: str = "", at: str = "",
     if re.search(r"[:：]", kind + fee) or kind in _FIELD_WORDS or fee in _FIELD_WORDS:
         return None
 
-    from .kpi import strip_speed      # 「139续约升500M」的 500 不是档位（kpi 引用本模块，放函数里免得循环引用）
+    # kpi 引用本模块，放函数里免得循环引用
+    from .kpi import strip_speed, sub_broadbands   # 「139续约升500M」的 500 不是档位；副宽 60 算千兆
     d = derive(kind, strip_speed(fee).strip() or fee)
     raw_kind, kind = kind, normalize_kind(kind)
     # 号卡张数：只看【纠正后】的类型 —— 「业务类型:新增 / 套餐:19山城卡」
@@ -1305,6 +1311,10 @@ def build_order(fields: dict, text: str, msg_id: str = "", at: str = "",
     elif d["tier"] >= HIGH_TIER_MIN:
         o.needs_review = True
         o.note = "千兆待核对"
+    # 副宽：每条 60 元（500M）的副宽另记 1 条千兆，新增、存量都算（09-29 用户定）；单办副宽就只数副宽
+    if d.get("kind") in ("新增", "存量") and _SUB_BB.search(fee):
+        fast = sum(sub_broadbands(fee))
+        o.giga = fast if d.get("solo") else o.giga + fast
     # 业务类型写了个认不出的词（既不像新增也不像存量/单C）：
     # 照原文记，标出来让人看一眼，别让它悄悄按 0 计
     if o.kind not in ("新增", "存量", "单C"):
