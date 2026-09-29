@@ -183,6 +183,7 @@ def _build(raw: dict) -> Bundle:
     backup = BackupSettings(**{k: v for k, v in (raw.get("backup") or {}).items()
                                if k in BackupSettings.__dataclass_fields__})
     backup.admins = [str(a) for a in _as_list(backup.admins, "backup.admins")]
+    backup.notify = [str(a) for a in _as_list(backup.notify, "backup.notify")]
     for slot in checkin.slots or ():
         for k in ("start", "end"):
             slot[k] = _as_hhmm(slot.get(k, ""), f"checkin.slots.{slot.get('name', '')}.{k}")

@@ -151,10 +151,30 @@ def test_branch_by_collector():
     eq([o.branch for o in got], ["古南", "三江", "东溪"], "换名册重新归组后不变")
 
 
+def test_notify_only():
+    """提醒只发 backup.notify 的人，管理员再多也不发（09-29 用户：只发黄涛）。"""
+    cfg = store.backup_settings()
+    old = (cfg.admins, cfg.notify)
+    cfg.admins, cfg.notify = [ADMIN, "u_admin2"], [ADMIN]
+    try:
+        n = len(plat.sent_texts)
+        send(order("13900000021", "东溪支局", "路人丙"), chat="g_hq", sender="u_nobody3")
+        got = [c for c, t in plat.sent_texts[n:] if "查不到这个人" in t]
+        eq(got, [ADMIN], "认不出的人：只提醒 notify 里的人")
+        cfg.notify = []
+        n = len(plat.sent_texts)
+        send(order("13900000022", "东溪支局", "路人丁"), chat="g_hq", sender="u_nobody4")
+        got = sorted(c for c, t in plat.sent_texts[n:] if "查不到这个人" in t)
+        eq(got, sorted([ADMIN, "u_admin2"]), "notify 没配 → 退回发给全部管理员")
+    finally:
+        cfg.admins, cfg.notify = old
+
+
 run(test_multi_on)
 run(test_import)
 run(test_identify)
 run(test_orders)
 run(test_branch_by_collector)
 run(test_collector_fallback)
+run(test_notify_only)
 done()

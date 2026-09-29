@@ -515,11 +515,15 @@ class Pipeline:
                             f"请把他补进名册，或在 data/userid_map.json 里加上「账号: 姓名」，补好后自动归类")
 
     def _notify_admins(self, text: str) -> None:
-        """单聊发给每个管理员（企微单聊的会话 ID 就是账号 ID）。"""
+        """
+        单聊提醒（企微单聊的会话 ID 就是账号 ID）。发给 backup.notify 列的人 —— 管理员以后会多，
+        提醒只发黄涛（09-29 用户定）；notify 没配才发给全部管理员。
+        """
         send = getattr(self.platform, "send_text", None)
         if send is None:
             return
-        for uid in self.store.backup_settings().admins or ():
+        cfg = self.store.backup_settings()
+        for uid in cfg.notify or cfg.admins or ():
             try:
                 send(uid, text)
             except Exception:
