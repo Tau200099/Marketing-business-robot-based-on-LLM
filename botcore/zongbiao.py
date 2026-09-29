@@ -136,15 +136,25 @@ def build_table(cfg: GuoqingSettings, orders: list, now: datetime) -> dict:
             r.day_prog, r.day_comp = _composite(r.day_done, r.day_target)
             r.cum_prog, r.cum_comp = _composite(r.cum_done, r.cum_target)
             group.append(r)
-        scored = any(r.cum_comp > 0 for r in group)
-        ranked = sorted(group, key=lambda r: r.cum_comp, reverse=True)
+        # 同类排名（09-29 用户定）：按累计综合进度，一样的并列同名次、名次连着排
+        #   （只有一个支局有业绩：它第 1，其余并列第 2；两个有业绩：第 1、第 2，其余并列第 3）；一个有业绩的都没有就都不排。
+        # PK：这一类里有业绩的支局数 ≥ 支局数 − 1 才开始，之前 PK 一栏都是「-」
+        scoring = sum(1 for r in group if r.cum_comp > 0)
+        pk_on = scoring > 0 and scoring >= len(group) - 1
+        levels = sorted({round(r.cum_comp, 6) for r in group}, reverse=True)
         amounts = list(cfg.pk.get(cls) or [])
-        for i, r in enumerate(ranked, 1):
-            if not scored:
+        for r in group:
+            if not scoring:
                 r.rank, r.pk = 0, "-"
                 continue
-            r.rank = i
-            amt = amounts[i - 1] if i - 1 < len(amounts) else 0
+            r.rank = levels.index(round(r.cum_comp, 6)) + 1
+            if not pk_on:
+                r.pk = "-"
+                continue
+            # PK 金额按「前面有几个支局比它强」取档（并列的拿它们里最好的那档）：名次连着排只是显示，
+            # 不能让没业绩的排在一串并列后面拿到靠前的档
+            pos = sum(1 for x in group if round(x.cum_comp, 6) > round(r.cum_comp, 6))
+            amt = amounts[pos] if pos < len(amounts) else 0
             r.pk = f"{amt:+d}" if amt else "0"
             if amt < 0 and r.cum_comp > 1.0:
                 r.pk += "（分公司出资）"
