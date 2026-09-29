@@ -1347,6 +1347,13 @@ def build_order(fields: dict, text: str, msg_id: str = "", at: str = "",
     # 新增宽带 / 中高套 / 云盒AI智屏 / 单号卡 也一样：和总表同一套判定，活动群只记个数（09-29 用户定）。
     # 新增宽带不折算（780 包年记 1）、明星机赠送不算；中高套 239 以上也记 1；云盒/AI/智屏 写了价钱才算、FTTR 不算进这列
     o.broadband, o.high, o.box = k.bb_lines, (1 if k.high else 0), k.box_items
+    if any(n.startswith("单宽 99–137") for n in k.notes):
+        # 99–137 的单宽：总表什么都不算，活动表记长续约（09-30 用户：这是存量提值）；积分算不出，没写就标待核对
+        o.broadband, o.renew = 0, 1
+        if not points_raw:
+            o.points = 0
+            o.needs_review = True
+            o.note = (o.note + " 单宽 99–137 按长续约记，积分待核对").strip()
     if o.kind == "单C":
         o.card = int(k.card)
     if any("待核对" in n for n in k.notes):

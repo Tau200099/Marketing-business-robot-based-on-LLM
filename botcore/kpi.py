@@ -20,7 +20,14 @@
 套包：只算「办理套餐」里写出来的加装钱（「239+25元FTTR」「239+10」），没写价钱不算；
       套包分 = 加装钱合计 ÷ 10（9.9 按 10 算），有智屏再加 0.3。1 元提速、副宽、副卡、返费不是套包，权益金兑换没有钱也不算
 
-还在等领导定的：单号卡「剔除直管」—— 现在晒单写了「直管」就不算
+09-30《国庆节专项营销活动通知》+ 用户定（和上面冲突的以这里为准）：
+  · 进度封顶：宽带、千五、套包、单号卡最多 130%，中高套不封顶
+  · 新增宽带：融合不折算（79 / 99 也记 1）；单宽 138 及以上 0.5、69–98 0.4、68 及以下 0.3，99–137 总表不计量（活动表记长续约）；
+    780 / 390 包年 0.15，1390 / 1990 包年按 139 / 199 融合档位算（含中高套）；短期、列收 0.3；
+    明星机赠送、明厨亮灶、酒店宽带、新商专等政企套餐、单位团购不计量；副宽记 1、不算中高套
+  · 千五：新增主宽带也以模板勾选为准（千兆/500M 或 2000M 勾「是」），旧模板没这两栏才看档位；副宽看是不是 500M 以上
+  · 套包：加装钱合计满 9.9 元才计量（5 元不算，5 + 5 算 1）
+  · 单号卡「剔除直管」不用；跨区域 6:4、优秀支局、优秀明星不做（后期手动统计）
 """
 
 from __future__ import annotations
@@ -31,7 +38,7 @@ from dataclasses import dataclass, field
 from .campaign import HIGH_TIER_MIN, SOLO_GIGA_TIERS, _IS_CARD, _ONLY_SUBCARD, _TECH_TAG, normalize_kind
 
 WEIGHTS = {"broadband": 0.25, "high": 0.30, "giga": 0.20, "pack": 0.15, "card": 0.10}
-CAPPED = {"giga", "pack", "card"}     # 这三项进度最多算 130%，宽带、中高套不封顶
+CAPPED = {"broadband", "giga", "pack", "card"}     # 这四项进度最多算 130%，中高套不封顶（09-30 通知）
 CAP = 1.30
 
 TIER_2000M = 239          # 239 / 299 / 399 是 2000M
@@ -41,10 +48,15 @@ GIGA_SPEED = 500          # 千五：500M 及以上
 GIGA_LIFT = 10            # 存量：提值 ≥10
 TIERS = {79, 99, 129, 139, 169, 199, 239, 299, 399}   # 融合档位（剥权益金数字时用来认「这是档位不是金币」）
 
-# 新增宽带折算：写了这些字才折（1390 包年里的「390包年」不算）
-_FOLD_THIRD = re.compile(r"明厨亮灶|(?<!\d)780\s*包年")
-_FOLD_FIFTH = re.compile(r"酒店|短期|临时宽带|列收|(?<!\d)390\s*包年")
-_NO_COUNT = re.compile(r"明星机")
+# 新增宽带计量（09-30 通知 + 用户定）：融合不折算；单宽 138 及以上 0.5、69–98 0.4、68 及以下 0.3、99–137 不计量；
+# 780 / 390 包年 0.15（1390 / 1990 包年按 139 / 199 融合档位）；短期、列收 0.3；这些字写了就什么都不算：
+_NO_COUNT = re.compile(r"明星机|明厨亮灶|酒店|新商专|政企|团购")
+_SHORT = re.compile(r"短期|临时宽带|列收")
+_YEARLY = re.compile(r"包年")
+YEARLY_AS_TIER = {1390: 139, 1990: 199}
+SOLO_HALF = 138           # 单宽 138 及以上 0.5
+SOLO_NONE = 99            # 单宽 99–137 总表不计量（用户：这是存量提值，活动表记长续约）
+SOLO_LOW = 68             # 单宽 68 及以下 0.3，69–98 0.4
 _DIRECT = re.compile(r"直管")
 _SOLO_WORD = re.compile(r"单宽|包年|包月")
 _EQUITY_WORD = re.compile(r"权益|兑换|金币")
@@ -78,6 +90,7 @@ _EQUITY_NUM = re.compile(r"(?:权益金?|金币)\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)
 _NOT_PACK = re.compile(r"(?<![\d.])\d+(?:\.\d+)?\s*元?\s*(?:的\s*)?(?:提速|副宽|副卡|副机)|(?:副宽|副卡|副机)\s*\d+(?:\.\d+)?|返\s*\d+(?:\.\d+)?")
 _SCREEN = re.compile(r"智屏")
 SCREEN_BONUS = 0.3
+PACK_MIN = 9.9            # 套包：加装钱合计满 9.9 元才计量（09-30 通知 + 用户）
 MIN_TIER = 39             # 第一个数 < 39 又紧挨着套包名的不是档位，是加装的钱（「10元云盒」「云盒10」；单写「38」是档位）
 _ITEM_WORD = r"(?:云盒|智屏|FTTR|光纤到房间|AI|视联网|看家|守护|摄像头)"
 
@@ -148,6 +161,13 @@ def _tier_of(text: str) -> int:
                          or re.search(rf"{_ITEM_WORD}\s*(?:加|[+＋➕])?\s*$", text[:m.start()], re.I)):
         return 0
     return int(v)
+
+
+def _giga_ticked(up_giga: str, up_2000: str, default: bool) -> bool:
+    """新增主宽带的千五（09-30 用户：勾选是标准）：新模板千兆/500M 或 2000M 勾了「是」就算；旧模板没这两栏才看档位（default）。"""
+    if up_giga or up_2000:
+        return up_giga == "是" or up_2000 == "是"
+    return default
 
 
 def _flag(v) -> str:
@@ -239,8 +259,11 @@ def _box_items(text: str, tier: int, loaded: str) -> int:
 
 
 def pack_score(money: float, screen: bool = False) -> float:
-    """套包分 = 加装钱合计 ÷ 10，有智屏再加 0.3；没写钱就是 0。例：10云盒 + 10智屏 = 2.3，AI 9.9 = 1，199改199+10+25 = 3.5。"""
-    if money <= 0:
+    """
+    套包分 = 加装钱合计 ÷ 10，有智屏再加 0.3；合计不满 9.9 元是 0（09-30）。
+    例：10云盒 + 10智屏 = 2.3，AI 9.9 = 1，199改199+10+25 = 3.5，5 元 = 0，5 + 5 = 1。
+    """
+    if money < PACK_MIN - 1e-9:
         return 0.0
     return money / 10 + (SCREEN_BONUS if screen else 0.0)
 
@@ -263,8 +286,9 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
     base = _tier_of(money)                        # 「10元云盒」「云盒10」：没写档位，10 是钱
     after_base = int(up.group(2)) if up else base
 
-    if _NO_COUNT.search(fee):
-        k.notes.append("明星机赠送宽带不计量")
+    no_count = _NO_COUNT.search(fee)
+    if no_count:
+        k.notes.append(f"{no_count.group()}不计量")
         return k
 
     # 号卡：19 元及以上，副卡、直管不算
@@ -294,33 +318,42 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
         # 新增纯加装（「10元云盒」「云盒」）：不是新开宽带 —— 只算套包（09-29 用户定）
         return k
     if kind == "新增" or (solo and kind != "存量"):
-        # ---- 新增宽带 ----
-        fold = 1.0
-        if _FOLD_THIRD.search(fee):
-            fold = 1 / 3
-        elif _FOLD_FIFTH.search(fee):
-            fold = 1 / 5
-        if solo:
-            if subs:                               # 单办副宽
-                k.broadband = fold * len(subs)
+        # ---- 新增宽带（09-30 通知 + 用户定）----
+        if _SHORT.search(fee):                     # 短期宽带、40 元及以下列收：0.3
+            k.broadband, k.bb_lines = 0.3, 1
+            return k
+        yearly_tier = YEARLY_AS_TIER.get(base) if _YEARLY.search(fee) else None
+        if solo and not yearly_tier:
+            if subs:                               # 单办副宽：每条记 1；千五看副宽是不是 500M 以上
+                k.broadband = float(len(subs))
                 k.bb_lines = len(subs)
                 k.giga = float(sum(subs))
-            else:                                  # 单宽 / 包年：138/198/1390/1990 是 500M 以上
-                k.broadband = fold
+            elif _YEARLY.search(fee):              # 780 / 390 包年：0.15
+                k.broadband, k.bb_lines = 0.15, 1
+                if base not in (780, 390):
+                    k.notes.append(f"{base or '没写价钱的'}包年按 0.15 计，待核对")
+            elif not base:
+                k.notes.append("单宽没写价钱，宽带待核对")
+            elif SOLO_NONE <= base < SOLO_HALF:
+                # 99–137 的单宽：总表什么都不算；活动表记长续约（build_order 看这条备注）
+                k.notes.append("单宽 99–137 总表不计量")
+            else:
+                k.broadband = 0.5 if base >= SOLO_HALF else (0.3 if base <= SOLO_LOW else 0.4)
                 k.bb_lines = 1
-                k.giga = 1.0 if base in SOLO_GIGA_TIERS else 0.0
+                k.giga = 1.0 if _giga_ticked(up_giga, up_2000, base in SOLO_GIGA_TIERS) else 0.0
             k.giga_lines = int(k.giga)
             return k
-        k.broadband = fold * (1 + len(subs))
+        # 融合（1390 / 1990 包年按 139 / 199 档位）：不折算；副宽各记 1
+        tier = yearly_tier or after_base          # 新增写了「改」（「109改139」异网策反之类）：按改成的档位算
+        k.broadband = float(1 + len(subs))
         k.bb_lines = 1 + len(subs)
-        # ---- 中高套（只算新增融合）----
-        # 新增写了「改」（「109改139」异网策反之类）：按改成的档位算
-        if after_base >= HIGH_13:
+        # ---- 中高套（只算新增融合，副宽不算）----
+        if tier >= HIGH_13:
             k.high = 1.3
-        elif after_base >= HIGH_TIER_MIN:
+        elif tier >= HIGH_TIER_MIN:
             k.high = 1.0
-        # ---- 千五：每条宽带各算一次；融合 139 及以上 500M 起，副宽 60 另算 ----
-        k.giga = (1.0 if after_base >= HIGH_TIER_MIN else 0.0) + sum(subs)
+        # ---- 千五：主宽带以模板勾选为准（旧模板看档位 139 起）；副宽 60 / 500M 另算 ----
+        k.giga = (1.0 if _giga_ticked(up_giga, up_2000, tier >= HIGH_TIER_MIN) else 0.0) + sum(subs)
         k.giga_lines = int(k.giga)
         return k
 
