@@ -282,7 +282,9 @@ def test_points_total():
     o = pts("存量", "199续约权益兑换FTTR")
     eq(o.renew, 1, "存量 199续约权益兑换FTTR：长续约 1")
     o = pts("存量", "699权益兑换FTTR")
-    check(o.needs_review and "权益" in o.note, "只有权益金币数、没有档位：照旧标黄请核对")
+    eq((o.renew, o.points, o.needs_review), (1, 0, False), "存量只有权益兑换：长续约 1、积分 0、不标黄（09-30 用户）")
+    o = pts("新增", "699权益兑换FTTR")
+    check(o.needs_review and "权益" in o.note, "新增只有权益金币数、没有档位：照旧标黄请核对")
 
 
 def test_progress_composite():

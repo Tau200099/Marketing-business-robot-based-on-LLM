@@ -610,6 +610,10 @@ def derive(kind: str, fee: str) -> dict:
     # 权益金币（699 兑换 FTTR 之类）：数字不是档位。留给人看，别算进去
     if _IS_EQUITY.search(fee) and not up and not equity_with_tier:
         out["tier"] = 0
+        if kind == "存量":
+            # 存量客户用权益金兑换 FTTR / 云盒（「699权益兑换FTTR」）：算一次长续约，积分 0，不用核对（09-30 用户）
+            out["renew"] = 1
+            return out
         out["points_unknown"] = True          # 让 build_order 标黄：是否计业绩要人定
         out["equity"] = True
         return out
