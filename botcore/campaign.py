@@ -83,6 +83,13 @@ _SUB_BB = re.compile(r"副宽")
 _IS_SOLO = re.compile(r"单宽|副宽|包年|包月")
 # 权益金币数，不是档位也不是积分（699 / 1200 / 1298 …）。见到就不当数字用
 _IS_EQUITY = re.compile(r"权益|金币")
+# 权益金币数（「699权益金」「权益金699」）：不是钱。档位数字（「239权益兑换FTTR」的 239）不在此列
+_EQUITY_AMOUNT = re.compile(r"(?:权益金?|金币)\s*(\d+)|(\d+)\s*(?:元|个)?\s*(?:权益|金币)")
+FUSION_TIERS = {79, 99, 129, 139, 169, 199, 239, 299, 399}
+
+
+def _drop_equity_amount(m: re.Match) -> str:
+    return m.group(0) if int(m.group(1) or m.group(2)) in FUSION_TIERS else " "
 # 号卡类：山城卡、号卡、单C 卡等。命中就不算宽带。
 # 号卡类：山城卡、号卡、携转异网卡、副卡、单C 等。命中就不算宽带。
 # 「携转」= 携号转网，把别家的号转过来，属于新增卡（实测漏判过）。
@@ -576,6 +583,14 @@ def derive(kind: str, fee: str) -> dict:
     fee = re.sub(r"(?<![\d.])9\.9(?![\d.])", "10", fee)
     raw_kind = (kind or "").strip()
     kind = normalize_kind(raw_kind)
+    equity_with_tier = False
+    if _IS_EQUITY.search(fee):
+        # 「239权益兑换FTTR」「239加699权益金兑换FTTR加10元云盒」：第一个数是宽带档位 → 照常算新增 / 续约，
+        # 权益金币数和兑换来的东西不算钱（09-30 回归测试：以前整单积分记 0、标黄）
+        stripped = _EQUITY_AMOUNT.sub(_drop_equity_amount, fee)
+        first = _NUM.search(stripped)
+        if first and int(first.group()) in FUSION_TIERS:
+            fee, equity_with_tier = stripped, True
     nums = [int(x) for x in _NUM.findall(fee)]
     base = nums[0] if nums else 0
 
@@ -590,7 +605,7 @@ def derive(kind: str, fee: str) -> dict:
                tier=final, kind=kind)
 
     # 权益金币（699 兑换 FTTR 之类）：数字不是档位。留给人看，别算进去
-    if _IS_EQUITY.search(fee) and not up:
+    if _IS_EQUITY.search(fee) and not up and not equity_with_tier:
         out["tier"] = 0
         out["points_unknown"] = True          # 让 build_order 标黄：是否计业绩要人定
         out["equity"] = True

@@ -255,6 +255,15 @@ def test_points_total():
         eq(pts(kind, fee).points, want, f"积分：{kind} {fee}")
     o = pts("新增", "10元云盒")
     eq((o.broadband, o.high, o.giga, o.box), (0, 0, 0, 1), "新增纯加装：活动群不记新增宽带，云盒记 1 个")
+    # 09-30 回归测试：第一个数是档位的权益兑换照常算；只有权益金币数（699）没有档位的才标黄
+    for kind, fee, want in (("新增", "239权益兑换FTTR", 239), ("新增", "239加699权益金兑换FTTR加10元云盒", 249),
+                            ("存量", "199续约权益兑换FTTR", 0)):
+        o = pts(kind, fee)
+        eq((o.points, o.needs_review), (want, False), f"权益兑换带档位：{kind} {fee} 积分 {want}、不标黄")
+    o = pts("存量", "199续约权益兑换FTTR")
+    eq(o.renew, 1, "存量 199续约权益兑换FTTR：长续约 1")
+    o = pts("存量", "699权益兑换FTTR")
+    check(o.needs_review and "权益" in o.note, "只有权益金币数、没有档位：照旧标黄请核对")
 
 
 def test_progress_composite():
