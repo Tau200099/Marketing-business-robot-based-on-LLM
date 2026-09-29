@@ -1386,7 +1386,11 @@ def build_order(fields: dict, text: str, msg_id: str = "", at: str = "",
         o.needs_review = True
         o.note = (o.note + f" 业务类型「{raw_kind}」待核对").strip()
     # 高迁 / 提值 / 负迁 这类差价算不出来的，晒单里没写积分就标出来
-    if d.get("downgrade"):
+    if d.get("downgrade") and k.sign2000 == "低签":
+        # 2000M 低签（399改299、239+10改239 勾了 2000M）：活动记长续约 1、积分 0；总表千五 ×1.1（09-30 用户）
+        o.renew = 1
+        o.note = (o.note + " 2000M低签").strip()
+    elif d.get("downgrade"):
         # 降档（139改99、负迁、139改99+10 总和变小）：照记，不算长续约不算分
         o.note = (o.note + " 降档不计业绩").strip()
     elif d.get("equity"):

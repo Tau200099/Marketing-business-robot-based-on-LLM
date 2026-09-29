@@ -23,10 +23,13 @@
 09-30《国庆节专项营销活动通知》+ 用户定（和上面冲突的以这里为准）：
   · 进度封顶：宽带、千五、套包、单号卡最多 130%，中高套不封顶
   · 新增宽带：融合不折算（79 / 99 也记 1）；单宽 138 及以上 0.5、69–137 0.4、68 及以下 0.3（资费没有 99–137 这档，出现了按 0.4、活动记新增）；
-    780 / 390 包年 0.15，1390 / 1990 包年按 139 / 199 融合档位算（含中高套）；短期、列收 0.3；
+    780 / 690 / 390 包年 0.15、990 包年 0.3，1390 / 1990 包年按 139 / 199 融合档位算（含中高套）；短期、列收 0.3；
+    单办副宽（没有主宽带）按 0.3、活动记 1 条；跟着融合办的副宽记 1
     明星机赠送、明厨亮灶、酒店宽带、新商专等政企套餐、单位团购不计量；副宽记 1、不算中高套
   · 千五：新增主宽带也以模板勾选为准（千兆/500M 或 2000M 勾「是」），旧模板没这两栏才看档位；副宽看是不是 500M 以上
-    活动群的千兆 / 500M 和总表不一样：新模板勾了「是」就记 1，存量不看提值 ≥10
+    「是否升级千兆/500M / 2000M」只管主宽带；副宽只看套餐（60 = 500M 记 1，其他 0）
+    活动群的千兆 / 500M 和总表不一样：新模板勾了「是」就记 1，存量不看提值 ≥10（降档不记）
+  · 2000M 低签（降档）：总表千五 ×1.1，活动记长续约 1、积分 0
   · 套包：加装钱合计满 9.9 元才计量（5 元不算，5 + 5 算 1）
   · 单号卡「剔除直管」不用；跨区域 6:4、优秀支局、优秀明星不做（后期手动统计）
 """
@@ -55,6 +58,8 @@ _NO_COUNT = re.compile(r"明星机|明厨亮灶|酒店|新商专|政企|团购")
 _SHORT = re.compile(r"短期|临时宽带|列收")
 _YEARLY = re.compile(r"包年")
 YEARLY_AS_TIER = {1390: 139, 1990: 199}
+YEARLY_FOLD = {780: 0.15, 690: 0.15, 390: 0.15, 990: 0.3}     # 其他包年档位没见过：按 0.15、标待核对
+SUB_ONLY = 0.3            # 单办副宽（没有主宽带）：按 68 及以下单宽 0.3 计（09-30 用户）
 SOLO_HALF = 138           # 单宽 138 及以上 0.5
 SOLO_LOW = 68             # 单宽 68 及以下 0.3，69–137 0.4（资费里没有 99–137 这档，出现了按 0.4，09-30 用户）
 _DIRECT = re.compile(r"直管")
@@ -103,6 +108,7 @@ class KPI:
     pack: float = 0.0
     card: float = 0.0
     notes: list = field(default_factory=list)
+    sign2000: str = ""       # 存量 2000M：高迁 / 平签 / 低签（低签的活动表记长续约，build_order 看这个）
     giga_lines: int = 0      # 千五达标的宽带有几条（不乘 2000M 系数）：活动群的「千兆/500M」按这个数（09-29 用户定）
     bb_lines: int = 0        # 新增宽带几条（不折算、不 ×1.1）：活动群按这个数
     box_items: int = 0       # 写了价钱的云盒 / AI / 智屏 几个（FTTR 不算）：活动群「云盒/AI/智屏」按这个数
@@ -324,13 +330,13 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
             return k
         yearly_tier = YEARLY_AS_TIER.get(base) if _YEARLY.search(fee) else None
         if solo and not yearly_tier:
-            if subs:                               # 单办副宽：每条记 1；千五看副宽是不是 500M 以上
-                k.broadband = float(len(subs))
+            if subs:                               # 单办副宽：每条 0.3（活动记 1 条）；千五看副宽是不是 60 / 500M
+                k.broadband = SUB_ONLY * len(subs)
                 k.bb_lines = len(subs)
                 k.giga = float(sum(subs))
-            elif _YEARLY.search(fee):              # 780 / 390 包年：0.15
-                k.broadband, k.bb_lines = 0.15, 1
-                if base not in (780, 390):
+            elif _YEARLY.search(fee):              # 780 / 690 / 390 包年 0.15，990 包年 0.3
+                k.broadband, k.bb_lines = YEARLY_FOLD.get(base, 0.15), 1
+                if base not in YEARLY_FOLD:
                     k.notes.append(f"{base or '没写价钱的'}包年按 0.15 计，待核对")
             elif not base:
                 k.notes.append("单宽没写价钱，宽带待核对")
@@ -357,12 +363,13 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
     if kind == "存量":
         # 存量带副宽（09-29 用户定）：副宽是新开的一条宽带 —— 算新增宽带，60 元（500M）另记千五；
         # 副宽的钱不算进主宽带的迁转 / 提值（下面只看去掉副宽后的「主宽带」那段）
-        k.broadband = float(len(subs))
-        k.bb_lines = len(subs)
         sub_giga = float(sum(subs))
         main = _SUB_BB_TEXT.sub(" ", money) if subs else money
         up = _tier_up(main)
         before_tier = _tier_of(main)
+        # 副宽算新增宽带：跟着主宽带办的每条记 1；单办副宽（没有主宽带档位）每条 0.3（09-30 用户）
+        k.broadband = (1.0 if (before_tier or up) else SUB_ONLY) * len(subs)
+        k.bb_lines = len(subs)
         after_tier = int(up.group(2)) if up else before_tier
         after_text = main[up.start(2):] if up else main
         # 迁转前后的宽带档位和总和（总和 = 写出来的档位 + 加装钱 − 返费）
@@ -378,6 +385,7 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
         if is_2000:
             if up:
                 g = 1.5 if after_total > before_total else (1.2 if after_total == before_total else 1.1)
+                k.sign2000 = {1.5: "高迁", 1.2: "平签", 1.1: "低签"}[g]
             elif after_total > before_total or re.search(r"高迁|提值", fee):
                 g = 1.5                            # 「299续约加10元云盒」：总和变高 = 高迁
             elif re.search(r"降档|负迁|低签", fee):
@@ -403,12 +411,10 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
         main_giga = 1.0 if upgraded and after_speed >= GIGA_SPEED and after_total - before_total >= GIGA_LIFT else 0.0
         k.giga = main_giga + sub_giga
         # 活动群的千兆 / 500M 和总表不一样（09-30 用户）：新模板勾了「是」就记 1，不看提值 ≥10；旧模板没这栏才和总表一样。
-        # 带副宽的单，「是」可能是冲副宽（60 = 500M）勾的，副宽已经按速率另记 —— 主宽带要自己有升速 + 提值才记，免得重复；
-        # 单办副宽没有主宽带，主宽带不记
+        # 「是否升级」只管主宽带（09-30 用户），副宽只看套餐（上面 sub_giga）。单办副宽没有主宽带，主宽带不记；
+        # 降档（总和变低）速率不会往上走：勾了也不记（2000M 低签在上面单独算）
         if up_giga:
-            # 降档（总和变低）速率不会往上走：勾了也不记（2000M 低签在上面单独算）
-            act_main = 1 if (up_giga == "是" and after_tier and (not subs or main_giga)
-                             and after_total >= before_total) else 0
+            act_main = 1 if up_giga == "是" and after_tier and after_total >= before_total else 0
         else:
             act_main = int(main_giga)
         k.giga_lines = act_main + int(sub_giga)
