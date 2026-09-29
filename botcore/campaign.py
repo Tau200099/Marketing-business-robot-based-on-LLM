@@ -83,6 +83,8 @@ _SUB_BB = re.compile(r"副宽")
 _IS_SOLO = re.compile(r"单宽|副宽|包年|包月")
 # 权益金币数，不是档位也不是积分（699 / 1200 / 1298 …）。见到就不当数字用
 _IS_EQUITY = re.compile(r"权益|金币")
+# 包年宽带的积分按年费 ÷ 10（09-30 用户：新增 780 包年记 78、1390 包年记 139）
+_YEARLY_FEE = re.compile(r"(?<![\d.])(\d{3,4})(\s*元?\s*包年)")
 # 权益金币数（「699权益金」「权益金699」）：不是钱。档位数字（「239权益兑换FTTR」的 239）不在此列
 _EQUITY_AMOUNT = re.compile(r"(?:权益金?|金币)\s*(\d+)|(\d+)\s*(?:元|个)?\s*(?:权益|金币)")
 FUSION_TIERS = {79, 99, 129, 139, 169, 199, 239, 299, 399}
@@ -581,6 +583,7 @@ def derive(kind: str, fee: str) -> dict:
     fee = _TECH_TAG.sub("", (fee or "").strip())
     # 9.9（AI 守护 / 看家）按 10 分算（09-29 用户定）；不换的话整数口径会拆成 9 和 9
     fee = re.sub(r"(?<![\d.])9\.9(?![\d.])", "10", fee)
+    fee = _YEARLY_FEE.sub(lambda m: f"{int(m.group(1)) // 10}{m.group(2)}", fee)
     raw_kind = (kind or "").strip()
     kind = normalize_kind(raw_kind)
     equity_with_tier = False
@@ -1317,6 +1320,12 @@ def build_order(fields: dict, text: str, msg_id: str = "", at: str = "",
     from .kpi import strip_speed, sub_broadbands   # 「139续约升500M」的 500 不是档位；副宽 60 算千兆
     d = derive(kind, strip_speed(fee).strip() or fee)
     raw_kind, kind = kind, normalize_kind(kind)
+    # 「业务类型:新增 / 套餐:109改139」= 存量提值（09-30 用户）：按存量算 —— 新增宽带 0、长续约 1、积分 = 差价；
+    # 写了策反 / 异网 / 携转的是异网客户转过来，照旧算新增
+    new_with_change = kind == "新增" and bool(_UPGRADE.search(fee)) and not re.search(r"策反|异网|携转", raw_kind + fee)
+    if new_with_change:
+        kind = "存量"
+        d = derive("存量", strip_speed(fee).strip() or fee)
     # 号卡张数：只看【纠正后】的类型 —— 「业务类型:新增 / 套餐:19山城卡」
     # 经 derive 已经是单C。填了张数用张数，没填按 1 张（模板里这格常留空，
     # 以前留空记成 0，单号卡列系统性少计）；不是号卡单一律 0
@@ -1362,13 +1371,6 @@ def build_order(fields: dict, text: str, msg_id: str = "", at: str = "",
     # 新增宽带 / 中高套 / 云盒AI智屏 / 单号卡 也一样：和总表同一套判定，活动群只记个数（09-29 用户定）。
     # 新增宽带不折算（780 包年记 1）、明星机赠送不算；中高套 239 以上也记 1；云盒/AI/智屏 写了价钱才算、FTTR 不算进这列
     o.broadband, o.high, o.box = k.bb_lines, (1 if k.high else 0), k.box_items
-    if any(n.startswith("单宽 99–137") for n in k.notes):
-        # 99–137 的单宽：总表什么都不算，活动表记长续约（09-30 用户：这是存量提值）；积分算不出，没写就标待核对
-        o.broadband, o.renew = 0, 1
-        if not points_raw:
-            o.points = 0
-            o.needs_review = True
-            o.note = (o.note + " 单宽 99–137 按长续约记，积分待核对").strip()
     if o.kind == "单C":
         o.card = int(k.card)
     if any("待核对" in n for n in k.notes):
@@ -1377,9 +1379,9 @@ def build_order(fields: dict, text: str, msg_id: str = "", at: str = "",
     # 业务类型写了个认不出的词（既不像新增也不像存量/单C）：
     # 照原文记，标出来让人看一眼，别让它悄悄按 0 计
     # 「业务类型:新增 / 套餐:109改139」：新增不该有「改」，用户会上强调别这样报（09-29）；出现了照算，标黄让人核对
-    if o.kind == "新增" and _UPGRADE.search(fee):
+    if new_with_change:
         o.needs_review = True
-        o.note = (o.note + " 新增单写了「改」，请核对是新增还是存量").strip()
+        o.note = (o.note + " 新增单写了「改」，已按存量提值算，请核对").strip()
     if o.kind not in ("新增", "存量", "单C"):
         o.needs_review = True
         o.note = (o.note + f" 业务类型「{raw_kind}」待核对").strip()

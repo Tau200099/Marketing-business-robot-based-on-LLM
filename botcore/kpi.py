@@ -22,10 +22,11 @@
 
 09-30《国庆节专项营销活动通知》+ 用户定（和上面冲突的以这里为准）：
   · 进度封顶：宽带、千五、套包、单号卡最多 130%，中高套不封顶
-  · 新增宽带：融合不折算（79 / 99 也记 1）；单宽 138 及以上 0.5、69–98 0.4、68 及以下 0.3，99–137 总表不计量（活动表记长续约）；
+  · 新增宽带：融合不折算（79 / 99 也记 1）；单宽 138 及以上 0.5、69–137 0.4、68 及以下 0.3（资费没有 99–137 这档，出现了按 0.4、活动记新增）；
     780 / 390 包年 0.15，1390 / 1990 包年按 139 / 199 融合档位算（含中高套）；短期、列收 0.3；
     明星机赠送、明厨亮灶、酒店宽带、新商专等政企套餐、单位团购不计量；副宽记 1、不算中高套
   · 千五：新增主宽带也以模板勾选为准（千兆/500M 或 2000M 勾「是」），旧模板没这两栏才看档位；副宽看是不是 500M 以上
+    活动群的千兆 / 500M 和总表不一样：新模板勾了「是」就记 1，存量不看提值 ≥10
   · 套包：加装钱合计满 9.9 元才计量（5 元不算，5 + 5 算 1）
   · 单号卡「剔除直管」不用；跨区域 6:4、优秀支局、优秀明星不做（后期手动统计）
 """
@@ -48,15 +49,14 @@ GIGA_SPEED = 500          # 千五：500M 及以上
 GIGA_LIFT = 10            # 存量：提值 ≥10
 TIERS = {79, 99, 129, 139, 169, 199, 239, 299, 399}   # 融合档位（剥权益金数字时用来认「这是档位不是金币」）
 
-# 新增宽带计量（09-30 通知 + 用户定）：融合不折算；单宽 138 及以上 0.5、69–98 0.4、68 及以下 0.3、99–137 不计量；
+# 新增宽带计量（09-30 通知 + 用户定）：融合不折算；单宽 138 及以上 0.5、69–137 0.4、68 及以下 0.3；
 # 780 / 390 包年 0.15（1390 / 1990 包年按 139 / 199 融合档位）；短期、列收 0.3；这些字写了就什么都不算：
 _NO_COUNT = re.compile(r"明星机|明厨亮灶|酒店|新商专|政企|团购")
 _SHORT = re.compile(r"短期|临时宽带|列收")
 _YEARLY = re.compile(r"包年")
 YEARLY_AS_TIER = {1390: 139, 1990: 199}
 SOLO_HALF = 138           # 单宽 138 及以上 0.5
-SOLO_NONE = 99            # 单宽 99–137 总表不计量（用户：这是存量提值，活动表记长续约）
-SOLO_LOW = 68             # 单宽 68 及以下 0.3，69–98 0.4
+SOLO_LOW = 68             # 单宽 68 及以下 0.3，69–137 0.4（资费里没有 99–137 这档，出现了按 0.4，09-30 用户）
 _DIRECT = re.compile(r"直管")
 _SOLO_WORD = re.compile(r"单宽|包年|包月")
 _EQUITY_WORD = re.compile(r"权益|兑换|金币")
@@ -334,9 +334,6 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
                     k.notes.append(f"{base or '没写价钱的'}包年按 0.15 计，待核对")
             elif not base:
                 k.notes.append("单宽没写价钱，宽带待核对")
-            elif SOLO_NONE <= base < SOLO_HALF:
-                # 99–137 的单宽：总表什么都不算；活动表记长续约（build_order 看这条备注）
-                k.notes.append("单宽 99–137 总表不计量")
             else:
                 k.broadband = 0.5 if base >= SOLO_HALF else (0.3 if base <= SOLO_LOW else 0.4)
                 k.bb_lines = 1
@@ -405,7 +402,16 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
                 k.notes.append("写了提速 / 高迁，没写升到多少兆，千五待核对")
         main_giga = 1.0 if upgraded and after_speed >= GIGA_SPEED and after_total - before_total >= GIGA_LIFT else 0.0
         k.giga = main_giga + sub_giga
-        k.giga_lines = int(main_giga + sub_giga)
+        # 活动群的千兆 / 500M 和总表不一样（09-30 用户）：新模板勾了「是」就记 1，不看提值 ≥10；旧模板没这栏才和总表一样。
+        # 带副宽的单，「是」可能是冲副宽（60 = 500M）勾的，副宽已经按速率另记 —— 主宽带要自己有升速 + 提值才记，免得重复；
+        # 单办副宽没有主宽带，主宽带不记
+        if up_giga:
+            # 降档（总和变低）速率不会往上走：勾了也不记（2000M 低签在上面单独算）
+            act_main = 1 if (up_giga == "是" and after_tier and (not subs or main_giga)
+                             and after_total >= before_total) else 0
+        else:
+            act_main = int(main_giga)
+        k.giga_lines = act_main + int(sub_giga)
         return k
 
     k.notes.append(f"业务类型「{kind}」认不出，五项都记 0")

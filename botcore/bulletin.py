@@ -117,7 +117,7 @@ def _stem(team: str) -> str:
 _IMG_COLUMNS = [
     ("战区", 110), ("小组", 72), ("成员", 200),
     ("新增宽带", 96), ("中高套", 84), ("长续约", 84), ("千兆/500M", 104),
-    ("单号卡", 84), ("云盒/AI/智屏", 132), ("价值积分", 100),
+    ("单号卡", 84), ("云盒/AI视联网/天翼智屏", 200), ("价值积分", 100),
     ("综合进度", 108), ("排名", 64),
 ]
 _FONT_CANDIDATES = (
@@ -256,7 +256,7 @@ def render_png(groups: list[GroupStat], teams: list[TeamStat], targets: Targets,
     # 页脚：目标值，让看图的人知道进度是按什么算的
     foot = (f"目标：新增宽带 {targets.broadband}（{targets.w_broadband:.0%}）  "
             f"中高套 {targets.high}（{targets.w_high:.0%}）  "
-            f"云盒/AI/智屏 {targets.box}（{targets.w_box:.0%}）  "
+            f"云盒/AI视联网/天翼智屏 {targets.box}（{targets.w_box:.0%}）  "
             f"价值积分 {targets.points}（{targets.w_points:.0%}）")
     d.text((pad, y + 12), foot, font=_font(17), fill=(108, 117, 125))
     if note:
