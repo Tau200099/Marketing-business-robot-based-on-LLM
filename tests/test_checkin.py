@@ -162,6 +162,25 @@ def test_auth_rate_and_drop():
     eq((r["done"], r["dropped"], r["left"]), (0, 2, 0), "超过 3 天的放弃并删图")
 
 
+
+def test_relaxed_rules():
+    """09-29 放宽：证据里有摊位类字样当摊位（有人算拦截）；拿笔在纸上写画的板夹 / 拦截改判算账。"""
+    from botcore.checkin import VisionJudge
+    f = VisionJudge._interpret
+    base = {"people": True, "tv": "没有电视", "installing": False, "folder": False}
+    eq(f({**base, "place": "户外", "talking": False, "label": "无效", "evidence": "老人站在摊位前，桌上有展板和设备箱"})[0],
+       "拦截", "#19 证据写了摊位 / 展板：当摊位，算拦截")
+    eq(f({**base, "place": "其他", "talking": False, "label": "无效", "evidence": "红桌摊位，有人站立，无交谈"})[0],
+       "拦截", "#61 红桌摊位：算拦截")
+    eq(f({**base, "place": "入户", "talking": True, "label": "板夹", "evidence": "工作人员手持笔在翻开的资费单上书写"})[0],
+       "算账", "#93 拿笔在资费单上写：算账")
+    eq(f({**base, "place": "入户", "talking": True, "label": "板夹", "evidence": "工作人员手持蓝色板夹给客户看资费单"})[0],
+       "板夹", "只拿板夹给客户看、没写：还是板夹")
+    eq(f({**base, "place": "入户", "talking": False, "label": "无效", "evidence": "客户在客厅坐着"})[0],
+       "无效", "入户没展示：还是无效（没被放宽带偏）")
+
+
+run(test_relaxed_rules)
 if len(PHOTOS) < 8:
     skip("没有样本库（服务器 data/samples/checkin），照片相关测试不跑")
     run(test_p2p_text_order)

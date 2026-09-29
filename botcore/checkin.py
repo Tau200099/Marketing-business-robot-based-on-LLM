@@ -276,6 +276,10 @@ _CALC = re.compile(r"\d{2,}|[+×÷=＝]")
 # 手写字 OCR 常读不出来：模型说是拿笔在纸上写画的也认（09-28 #93 拿笔在宣传单上圈画，同事标算账）。
 # 不认「算」「计算器」这类字：座机被脑补成计算器的就是这么说的
 _HANDWRITING = re.compile(r"笔|手写|纸上|写|圈|画")
+# 09-29 放宽：模型证据里写了摊位类的东西，地点没报「摊位」也当摊位（#19「站在摊位前…展板」、#61「红桌摊位」被退成无效）
+_STALL_WORDS = re.compile(r"摊位|展台|展板|帐篷|易拉宝|折叠桌")
+# 09-29 放宽：拿笔在纸上写 / 圈 / 画 / 算，模型判成板夹或拦截的改判算账（#93「手持笔在翻开的资费单上书写」）
+_PEN_WRITING = re.compile(r"笔.{0,15}(?:写|圈|画|算)|手写")
 
 
 def _scene_text(items_text: list[str]) -> str:
@@ -477,6 +481,10 @@ class VisionJudge:
         if "监控" in evidence:
             tv = "普通节目"     # 监控多格画面会被认成云盒菜单（09-28 #75）
         talking = not (data.get("talking") is False or str(data.get("talking")).lower() == "false")
+        if place != "摊位" and _STALL_WORDS.search(evidence):
+            place = "摊位"
+        if label in ("板夹", "拦截") and people is not False and _PEN_WRITING.search(evidence):
+            label = "算账"
         if place == "摊位":
             # 摊位上一律算拦截：桌上摆着资料设备也是、没拍到正在说话也是（09-24 同事的标法）
             if label in ("板夹", "设备演示", "无效") and people is not False:
