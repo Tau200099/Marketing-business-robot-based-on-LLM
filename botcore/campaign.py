@@ -64,7 +64,8 @@ _LIFT = re.compile(r"提值\s*(\d+)")
 # 存量单看【总和】：前后各自「档位 + 附加 − 返费」
 _PART_NUM = re.compile(r"(?<![返])(\d+)")
 # 附加值：「+10」「＋10」「加10」「加装10」都算（09-29：只认字，员工不一定打 +）
-_ADDON = re.compile(r"(?:[+＋]|加装|加)\s*(\d+)")
+# 线上真实晒单还有用汉字「十」、表情「➕」当加号的（「139十10」「79➕10云盒」），「十」后面跟数字才算
+_ADDON = re.compile(r"(?:[+＋➕]|加装|加|十(?=\s*\d))\s*(\d+)")
 # 橙分期：「59返30」「99橙分期返55」—— 价值积分 = 月费 − 月返
 # （培训课件的橙分期表就是这么算的：59返30 → 29 分，399 → 199 分）
 _REBATE = re.compile(r"返\s*(\d+)")
@@ -590,7 +591,7 @@ def derive(kind: str, fee: str) -> dict:
     # 新增一条宽带，没有融合档位，不算中高套。
     # 「199+副宽」「99+副宽」是融合套餐带副宽 —— 带「+」的一律不走这里，
     # 由下面的新增分支按主宽 + 副宽数（以前 99/79+副宽 被当成单宽只记 1 条）
-    if _IS_SOLO.search(fee) and not up and not re.search(r"[+＋]|加", fee):
+    if _IS_SOLO.search(fee) and not up and not re.search(r"[+＋➕]|加|十(?=\s*\d)", fee):
         if kind != "存量":
             out["kind"] = "新增"
             out["broadband"] = 1

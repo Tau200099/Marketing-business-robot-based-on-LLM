@@ -75,10 +75,11 @@ _EQUITY_NUM = re.compile(r"(?:权益金?|金币)\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)
 
 # ---- 套包 ----
 # 这些钱不是套包：「1元提速」「副宽60 / 60元副宽」「副卡」「返55」
-_NOT_PACK = re.compile(r"(?<![\d.])\d+(?:\.\d+)?\s*元?\s*(?:的\s*)?(?:提速|副宽|副卡)|(?:副宽|副卡)\s*\d+(?:\.\d+)?|返\s*\d+(?:\.\d+)?")
+_NOT_PACK = re.compile(r"(?<![\d.])\d+(?:\.\d+)?\s*元?\s*(?:的\s*)?(?:提速|副宽|副卡|副机)|(?:副宽|副卡|副机)\s*\d+(?:\.\d+)?|返\s*\d+(?:\.\d+)?")
 _SCREEN = re.compile(r"智屏")
 SCREEN_BONUS = 0.3
-MIN_TIER = 39             # 第一个数 < 39 的不是档位，是加装的钱（「10元云盒」「云盒10」）
+MIN_TIER = 39             # 第一个数 < 39 又紧挨着套包名的不是档位，是加装的钱（「10元云盒」「云盒10」；单写「38」是档位）
+_ITEM_WORD = r"(?:云盒|智屏|FTTR|光纤到房间|AI|视联网|看家|守护|摄像头)"
 
 
 @dataclass
@@ -134,6 +135,18 @@ def _addon_money(text: str, tier: int) -> float:
     return sum(10.0 if abs(v - 9.9) < 1e-6 else v for v in nums)
 
 
+def _tier_of(text: str) -> int:
+    """第一个数当档位；「10元云盒」「云盒10」「9.9看家」这种紧挨着套包名的小数目是加装的钱，不是档位，返回 0。"""
+    m = _NUMF.search(text)
+    if not m:
+        return 0
+    v = float(m.group())
+    if v < MIN_TIER and (re.match(rf"\s*元?\s*(?:的\s*)?{_ITEM_WORD}", text[m.end():], re.I)
+                         or re.search(rf"{_ITEM_WORD}\s*(?:加|[+＋➕])?\s*$", text[:m.start()], re.I)):
+        return 0
+    return int(v)
+
+
 def _flag(v) -> str:
     """模板「是否升级…」一栏：是 / 否；模板里没这一栏为空串。"""
     v = (v or "").strip() if isinstance(v, str) else ("是" if v else "")
@@ -177,7 +190,7 @@ def _sub_bbs(fee: str) -> list[bool]:
         after = fee[m.end():m.end() + 12]
         before = fee[max(0, m.start() - 6):m.start()]
         pa = re.match(r"\s*(\d{2,3})(?![\d.]|\s*(?:MB|M|Ｍ|兆))", after, re.I)
-        pb = re.search(r"(?<![\d.])(\d{2})\s*元\s*(?:的\s*)?$", before)
+        pb = re.search(r"(?<![\d.])(\d{2})\s*元?\s*(?:的\s*)?$", before)      # 「60元副宽」「38副宽」
         sp = re.match(rf"\s*(?:\d{{2,3}}\s*元?\s*)?({_SPEED_UNIT})", after, re.I)
         price = int(pa.group(1)) if pa else (int(pb.group(1)) if pb else 0)
         out.append(price >= SUB_BB_GIGA_PRICE or bool(sp and _speed_value(sp.group(1)) >= GIGA_SPEED))
@@ -187,7 +200,7 @@ def _sub_bbs(fee: str) -> list[bool]:
 sub_broadbands = _sub_bbs          # 晒单解析（活动群战报 / 通报）也按这个数副宽的千五
 
 
-_SUB_BB_TEXT = re.compile(r"(?:(?<![\d.])\d{2}\s*元\s*(?:的\s*)?)?副宽\s*(?:\d{2,3}(?![\d.]))?")
+_SUB_BB_TEXT = re.compile(r"(?:(?<![\d.])\d{2}\s*元?\s*(?:的\s*)?)?副宽\s*(?:\d{2,3}(?![\d.]))?")
 
 
 # ---------------------------------------------------------------- 套包
@@ -214,7 +227,7 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
     up = _tier_up(money)
     nums = _NUMF.findall(money)
     first = int(float(nums[0])) if nums else 0
-    base = first if first >= MIN_TIER else 0      # 「10元云盒」「云盒10」：没写档位，10 是钱
+    base = _tier_of(money)                        # 「10元云盒」「云盒10」：没写档位，10 是钱
     after_base = int(up.group(2)) if up else base
 
     if _NO_COUNT.search(fee):
@@ -261,12 +274,13 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
             return k
         k.broadband = fold * (1 + len(subs))
         # ---- 中高套（只算新增融合）----
-        if base >= HIGH_13:
+        # 新增写了「改」（「109改139」异网策反之类）：按改成的档位算
+        if after_base >= HIGH_13:
             k.high = 1.3
-        elif base >= HIGH_TIER_MIN:
+        elif after_base >= HIGH_TIER_MIN:
             k.high = 1.0
         # ---- 千五：每条宽带各算一次；融合 139 及以上 500M 起，副宽 60 另算 ----
-        k.giga = (1.0 if base >= HIGH_TIER_MIN else 0.0) + sum(subs)
+        k.giga = (1.0 if after_base >= HIGH_TIER_MIN else 0.0) + sum(subs)
         return k
 
     if kind == "存量":
@@ -276,9 +290,7 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
         sub_giga = float(sum(subs))
         main = _SUB_BB_TEXT.sub(" ", money) if subs else money
         up = _tier_up(main)
-        mnums = _NUMF.findall(main)
-        mfirst = int(float(mnums[0])) if mnums else 0
-        before_tier = mfirst if mfirst >= MIN_TIER else 0
+        before_tier = _tier_of(main)
         after_tier = int(up.group(2)) if up else before_tier
         after_text = main[up.start(2):] if up else main
         # 迁转前后的宽带档位和总和（总和 = 写出来的档位 + 加装钱 − 返费）
