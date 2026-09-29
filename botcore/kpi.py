@@ -271,9 +271,7 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
     if _IS_CARD.search(fee) or _ONLY_SUBCARD.search(fee) or kind == "单C":
         if _ONLY_SUBCARD.search(fee):
             return k
-        if _DIRECT.search(fee):
-            k.notes.append("直管不计单号卡")
-            return k
+        # 「剔除直管」这次活动不用了（09-29 用户：直管这个概念从这次活动删除）
         price = int(up.group(2)) if up else first
         if price >= 19 or not nums:        # 没写月费（「山城卡」）判不了价钱，照算
             k.card = float(cards or 1)

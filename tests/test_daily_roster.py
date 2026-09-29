@@ -101,7 +101,38 @@ def test_placement_and_view():
     eq(groups, [("1组", "张一、王三"), ("2组", "李二、赵四、钱五")], "通报按那天的小组画")
 
 
+def test_extra_list():
+    """09-29：补充的非活动人员（渠道销售员）当揽收人算进总表；同名按支局挑；排了班那天还是活动人员。"""
+    (tmp / regions.EXTRA_FILE).write_text(json.dumps({"people": [["渠道甲", "古南"], ["张同", "永新"], ["张同", "隆盛"],
+                                                                  ["王三", "通惠"]]}, ensure_ascii=False),
+                                          encoding="utf-8")
+    rs = regions.RosterSet()
+    i = rs.identify_name("渠道甲")
+    eq((i.role, i.branch, i.region), (regions.OTHER, "古南", regions.CITY), "补充名单：非活动、支局按名单、城区支局算城区")
+    eq((rs.identify_name("张同", "隆盛").branch, rs.identify_name("张同", "永新").branch), ("隆盛", "永新"),
+       "同名不同人：按晒单写的支局挑")
+    eq(rs.identify_name("张同", "隆盛").region, regions.RURAL, "农村支局算农村")
+    eq(rs.on("2026-10-02").identify_name("王三").role, regions.ACTIVITY, "两边都有的人：排了班那天是活动人员")
+    d1 = rs.on("2026-10-01")
+    eq(d1.identify_name("杨同", "隆盛").role, regions.ACTIVITY, "隆盛没有叫杨同的：还是活动人员（东林、安稳里挑）")
+    (tmp / regions.EXTRA_FILE).write_text(json.dumps({"people": [["渠道甲", "古南"], ["张同", "永新"], ["张同", "隆盛"],
+                                                                  ["王三", "通惠"], ["杨同", "隆盛"]]}, ensure_ascii=False),
+                                          encoding="utf-8")
+    d1 = regions.RosterSet().on("2026-10-01")
+    eq((d1.identify_name("杨同", "隆盛").role, d1.identify_name("杨同", "隆盛").branch), (regions.OTHER, "隆盛"),
+       "活动人员和渠道销售员同名：写的是隆盛就挑隆盛那个渠道销售员")
+    eq(d1.identify_name("杨同", "安稳").role, regions.ACTIVITY, "写的是安稳就是活动人员那个")
+    eq(d1.identify_name("杨同").role, regions.ACTIVITY, "没写支局：活动人员优先")
+    check("渠道甲" in rs.all_names().people, "补充名单里的人也能按账号拼音认")
+    store = ConfigStore()
+    camp = Campaign(rs.activity[regions.CITY], store.campaign_settings().targets, rosters=rs)
+    o = Order(at="2026-10-02 11:00:00", kind="新增", fee="199", collector="渠道甲", team="通惠支局", msg_id="x1")
+    camp.add(o)
+    eq(o.branch, "古南", "渠道销售员当揽收人：总表算他名单里的支局")
+
+
 run(test_parse)
 run(test_by_day)
 run(test_placement_and_view)
+run(test_extra_list)
 done()

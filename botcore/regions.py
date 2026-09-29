@@ -37,6 +37,8 @@ ACTIVITY, OTHER, UNKNOWN = "活动", "非活动", "未识别"
 
 ACTIVITY_FILES = {CITY: "roster.json", RURAL: "roster_rural.json"}
 BRANCH_FILES = {CITY: "branch_city.json", RURAL: "branch_rural.json"}
+EXTRA_FILE = "branch_extra.json"    # 补充的非活动人员（渠道销售员）：姓名 → 支局（09-29）
+CITY_BRANCHES = ("通惠", "古南", "文龙", "万盛", "东林")
 CHIEFS_FILE = "chiefs.json"
 
 # 管理员单聊先发这句，再发 Excel：导哪张
@@ -415,6 +417,49 @@ class _AllNames:
         self.people = people
 
 
+class ExtraRoster:
+    """
+    补充的非活动人员名单（09-29 用户：渠道销售员，当揽收人也要算进攻坚群总表）。
+    data/branch_extra.json：{"people": [[姓名, 支局], ...]} —— 用列表不用字典：同名不同人（两个张彬）各占一行。
+    区域按支局：城区五个支局算城区，其余算农村。
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self.people: dict[str, list[str]] = {}
+        self._mtime = None
+        self.reload()
+
+    def reload(self) -> None:
+        self.people = {}
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            self._mtime = self.path.stat().st_mtime
+        except FileNotFoundError:
+            self._mtime = None
+            return
+        except Exception as exc:
+            log.error("补充名单读不了：%s", exc)
+            return
+        for name, branch in raw.get("people") or []:
+            name, branch = str(name or "").strip(), branch_stem(str(branch or ""))
+            if name and branch and branch not in self.people.setdefault(name, []):
+                self.people[name].append(branch)
+
+    def maybe_reload(self) -> bool:
+        try:
+            mtime = self.path.stat().st_mtime
+        except OSError:
+            mtime = None
+        if mtime == self._mtime:
+            return False
+        self.reload()
+        return True
+
+    def identities(self, name: str) -> list["Identity"]:
+        return [Identity(name, CITY if b in CITY_BRANCHES else RURAL, OTHER, "", "", b) for b in self.people.get(name, [])]
+
+
 class DailyRosters:
     """
     国庆每天的活动名单（09-29 用户：活动人员每天不同；我提前做好放后台，到哪天用哪天）。
@@ -467,6 +512,7 @@ class RosterSet:
         self.branch = {r: BranchRoster(d / BRANCH_FILES[r]) for r in REGIONS}
         self.chiefs = ChiefList(d / CHIEFS_FILE)
         self.daily = DailyRosters(d / DAILY_FILE)
+        self.extra = ExtraRoster(d / EXTRA_FILE)
 
     def maybe_reload(self) -> bool:
         changed = False
@@ -475,6 +521,7 @@ class RosterSet:
             changed |= self.branch[r].maybe_reload()
         changed |= self.chiefs.maybe_reload()
         changed |= self.daily.maybe_reload()
+        changed |= self.extra.maybe_reload()
         return changed
 
     def on(self, day: str | None) -> "RosterSet":
@@ -495,6 +542,7 @@ class RosterSet:
             people.update({n: {} for n in self.branch[r].people})
             people.update({n: {} for n in self.activity[r].people})
         people.update({n: {} for n in self.daily.names()})       # 7 天名单里的人都认得（账号拼音对人）
+        people.update({n: {} for n in self.extra.people})         # 补充名单（渠道销售员）
         people.update({n: {} for n in self.chiefs.names()})
         return _AllNames(people)
 
@@ -515,15 +563,19 @@ class RosterSet:
                 info = ros.people.get(name) or {}
                 hits.append(Identity(name, r, ACTIVITY, team, grp, b.get("branch") or branch_stem(team),
                                      bool(b.get("community") or info.get("community"))))
-        if not hits:
-            for r in REGIONS:
-                b = self.branch[r].people.get(name)
-                if b:
-                    hits.append(Identity(name, r, OTHER, "", "", b.get("branch", ""), bool(b.get("community"))))
-        if not hits:
+        # 非活动的候选：全员名单 + 补充名单（渠道销售员）。同名不同人（永新活动人员张彬、隆盛渠道张彬）
+        # 都列上，按支局挑；对不上支局时活动人员优先（09-29）
+        others = []
+        for r in REGIONS:
+            b = self.branch[r].people.get(name)
+            if b:
+                others.append(Identity(name, r, OTHER, "", "", b.get("branch", ""), bool(b.get("community"))))
+        others += [h for h in self.extra.identities(name) if h.branch not in {x.branch for x in others}]
+        cands = hits + [h for h in others if h.branch not in {x.branch for x in hits}]
+        if not cands:
             return Identity(name=name)
         want = branch_stem(prefer_branch)
-        return next((h for h in hits if want and h.branch == want), hits[0])
+        return next((h for h in cands if want and h.branch == want), cands[0])
 
     def identify_sender(self, userid: str, prefer_branch: str = "") -> Identity:
         from .checkin import sender_name
