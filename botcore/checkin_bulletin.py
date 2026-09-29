@@ -286,7 +286,8 @@ class CheckinBulletin:
         s = self.store.checkin_settings()
         camp = self._campaign()
         camp.refresh_roster()
-        roster = camp.rosters.activity[region] if (region and getattr(camp, "rosters", None)) else camp.roster
+        roster = (camp.rosters.on(now.strftime("%Y-%m-%d")).activity[region]      # 那天的活动名单（09-29）
+                  if (region and getattr(camp, "rosters", None)) else camp.roster)
         records = of_region(load_records(DATA / s.store_file), region)
         return build_report(records, roster, s, self.store.campaign_settings().title, now)
 

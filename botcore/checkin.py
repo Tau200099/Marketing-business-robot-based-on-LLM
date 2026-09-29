@@ -839,7 +839,7 @@ class CheckinRecorder:
         region = ""
         if self.identify is not None:
             # 只有活动人员打卡（09-29）：① 发送人账号 ② 认不出再看水印小组成员 ③ 还不行就不记，回一句让他改信息重发
-            status, region = self.identify(sender, wm.get("members", ""))
+            status, region = self.identify(sender, wm.get("members", ""), wm.get("stamp", ""), wm.get("branch", ""))
             if status != "ok":
                 log.info("打卡没记（%s）| 发送人=%s | 小组成员=%s", status, sender or "?", wm.get("members") or "空")
                 return status, None

@@ -352,6 +352,19 @@ class Roster:
         except Exception as exc:
             log.error("名册读不了：%s", exc)
             return
+        self._load(raw)
+
+    @classmethod
+    def from_dict(cls, raw: dict, label: str = "") -> "Roster":
+        """从字典建名册（国庆每天一份的名单，见 regions.DailyRosters）。不对应文件，不热加载。"""
+        r = cls.__new__(cls)
+        r.path = Path(label or "roster_days")
+        r.teams, r.people, r._aliases = [], {}, {}
+        r._mtime = None
+        r._load(raw, quiet=True)
+        return r
+
+    def _load(self, raw: dict, quiet: bool = False) -> None:
         self.teams = list(raw.get("teams") or [])
         self.people = _names_as_groups(dict(raw.get("people") or {}))
 
@@ -362,7 +375,8 @@ class Roster:
             stem = t.replace("战队", "").replace("支局", "").strip()
             for form in (t, stem, stem + "战队", stem + "支局", stem + "战区"):
                 self._aliases[form] = t
-        log.info("名册：%d 人 / %d 个战队", len(self.people), len(self.teams))
+        if not quiet:
+            log.info("名册：%d 人 / %d 个战队", len(self.people), len(self.teams))
 
     def maybe_reload(self) -> bool:
         """
@@ -831,16 +845,18 @@ class Campaign:
             v.orders = [replace(o, team=o.branch or "未归属", group=BranchRoster.ALL) for o in self.orders]
         return v
 
-    def view(self, region: str, targets: "Targets | None" = None) -> "Campaign":
+    def view(self, region: str, targets: "Targets | None" = None, day: str = "") -> "Campaign":
         """
         某个区域的活动人员的单（城区 / 农村活动群的通报、晒单表用）。只读：不存盘、不重新归组。
         订单对象和主台账是同一批，统计时只读不改。
+        day（YYYY-MM-DD，不给 = 今天）：表里的小组按那天的活动名单画（国庆每天名单不同，09-29）。
         """
         from .regions import ACTIVITY
         v = Campaign.__new__(Campaign)
         v.rosters = None
         v._readonly = True
-        v.roster = self.rosters.activity[region] if self.rosters is not None else self.roster
+        day = day or datetime.now().strftime("%Y-%m-%d")
+        v.roster = self.rosters.on(day).activity[region] if self.rosters is not None else self.roster
         v.targets = targets or self.targets
         v.path = self.path
         v._seen = set()
@@ -1062,16 +1078,16 @@ class Campaign:
         落地支局（总表用）= 晒单里写的「支局」；没写按人查到的支局。
         """
         from .regions import ACTIVITY, UNKNOWN, branch_stem
-        rs = self.rosters
+        rs = self.rosters.on((order.at or "")[:10])     # 国庆每天名单不同：按这单那天的名单认人（09-29）
         if not order.written_branch:
             # 第一次归组时 team 还是晒单里写的「支局」（build_order 放进来的），先存下来；
             # 老记录没有这个字段，branch 里存的就是当时写的支局
             order.written_branch = order.branch or branch_stem(order.team)
-        ident = rs.identify_sender(order.sender_id) if order.sender_id else None
+        ident = rs.identify_sender(order.sender_id, order.written_branch) if order.sender_id else None
         poster_branch = ident.branch if ident is not None and ident.role != UNKNOWN else ""
         order.poster = ident.name if ident and ident.role != UNKNOWN else ""
         if (ident is None or ident.role == UNKNOWN) and order.collector:
-            by_collector = rs.identify_name(order.collector)
+            by_collector = rs.identify_name(order.collector, order.written_branch)
             if by_collector.role != UNKNOWN:
                 ident = by_collector
                 if order.sender_id:
@@ -1084,7 +1100,7 @@ class Campaign:
                 order.group, order.team = "", ident.branch
         # 总表归哪个支局（09-29 用户定）：按揽收人查名册 → 他的支局；揽收人没写 / 查不到 → 晒单里写的支局 → 晒单人的支局
         #（用户确认过不会出现揽收人是别的支局的人）
-        by_collector = rs.identify_name(order.collector) if order.collector else None
+        by_collector = rs.identify_name(order.collector, order.written_branch) if order.collector else None
         if by_collector is not None and by_collector.role != UNKNOWN and by_collector.branch:
             order.branch = by_collector.branch
         else:

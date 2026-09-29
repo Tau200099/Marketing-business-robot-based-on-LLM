@@ -38,10 +38,10 @@ def _campaign(store):
     return Campaign(Roster(), store.campaign_settings().targets)
 
 
-def _region_camp(store, camp, region: str | None):
-    """多群某区：只读视图（这个区活动人员的单 + 这个区的活动名册和目标）。"""
+def _region_camp(store, camp, region: str | None, day: date | None = None):
+    """多群某区：只读视图（这个区活动人员的单 + 这个区那天的活动名册和目标）。"""
     if region and getattr(camp, "rosters", None) is not None:
-        return camp.view(region, store.campaign_settings().targets_for(region))
+        return camp.view(region, store.campaign_settings().targets_for(region), day.isoformat() if day else "")
     return camp
 
 
@@ -49,7 +49,7 @@ def build_sales(store, camp, day: date, out: Path, region: str | None = None) ->
     """晒单 Excel：那天的晒单数据 + 那周周一到那天的清单。region：多群模式的 城区 / 农村。"""
     from .report import build_workbook, summary_title
     cfg = store.campaign_settings()
-    camp = _region_camp(store, camp, region)
+    camp = _region_camp(store, camp, region, day)
     end = datetime.combine(day, dtime(23, 59, 59))
     now = min(end, datetime.now())
     rank = cfg.window("rank", end)
@@ -64,7 +64,7 @@ def build_checkin(store, camp, day: date, out: Path, region: str | None = None) 
     from openpyxl import Workbook
     from .checkin import day_sheets, write_checkin_sheet
     ck = store.checkin_settings()
-    roster = _region_camp(store, camp, region).roster
+    roster = _region_camp(store, camp, region, day).roster
     wb = Workbook()
     wb.remove(wb.active)
     for name, title, records in day_sheets(ck, day.strftime("%Y-%m-%d"), store.campaign_settings().title, region):

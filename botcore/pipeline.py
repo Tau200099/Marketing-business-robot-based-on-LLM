@@ -737,7 +737,7 @@ class Pipeline:
 
     # ---------- 单聊打卡 ----------
 
-    def _checkin_identity(self, sender: str, members: str) -> tuple[str, str | None]:
+    def _checkin_identity(self, sender: str, members: str, stamp: str = "", branch: str = "") -> tuple[str, str | None]:
         """
         打卡归谁（09-29 用户定）：① 先按发送人账号查名册 —— 活动人员记到他那区；认出来但不是活动人员 → 不记；
         ② 账号认不出，再按水印「小组成员」找活动人员；③ 都不行 → 不记，让他改账号或照片人员信息后重发。
@@ -745,9 +745,9 @@ class Pipeline:
         """
         if not regions.multi_enabled(self.store):
             return "ok", None
-        rs = self.rosters
-        rs.maybe_reload()
-        who = rs.identify_sender(sender) if sender else regions.Identity()
+        self.rosters.maybe_reload()
+        rs = self.rosters.on(stamp[:10])      # 国庆每天名单不同：按水印那天的名单（09-29）
+        who = rs.identify_sender(sender, branch) if sender else regions.Identity()
         if who.role == regions.ACTIVITY:
             return "ok", who.region
         if who.role == regions.OTHER:

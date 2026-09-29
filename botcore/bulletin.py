@@ -509,14 +509,14 @@ class Bulletin:
         except RuntimeError:
             log.debug("正在退出，放弃通报")
 
-    def _camp(self, region: str | None) -> Campaign:
+    def _camp(self, region: str | None, now: datetime | None = None) -> Campaign:
         """单群：主台账；多群某区：只读视图（只有这个区活动人员的单、用这个区的活动名册和目标）。"""
         camp_cfg = self.store.campaign_settings()
         camp: Campaign = self._campaign()
         camp.targets = camp_cfg.targets
         camp.refresh_roster()          # TeleAgent 可能刚改过名册
         if region and getattr(camp, "rosters", None) is not None:
-            return camp.view(region, camp_cfg.targets_for(region))
+            return camp.view(region, camp_cfg.targets_for(region), (now or datetime.now()).strftime("%Y-%m-%d"))
         return camp
 
     def build(self, now: datetime | None = None, region: str | None = None) -> tuple[str, bytes, Path]:
@@ -524,7 +524,7 @@ class Bulletin:
         now = now or datetime.now()
         cfg = self.store.bulletin_settings()
         camp_cfg = self.store.campaign_settings()
-        camp = self._camp(region)
+        camp = self._camp(region, now)
         # 排名按天、清单按周（campaign.rank_period / ledger_period），两个窗口分开取
         rank = camp_cfg.window("rank", now)
         ledger = camp_cfg.window("ledger", now)

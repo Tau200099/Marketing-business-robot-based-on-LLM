@@ -30,7 +30,7 @@ ORDERS = [
     o(TODAY, "通惠", "新增", "199+10", "云盒"),
     o(TODAY, "通惠", "新增", "199+10", "云盒"),
     o(TODAY, "通惠", "单C", "19山城卡", card=1),
-    o(TODAY, "通惠", "新增", "139", community=True),       # 小区营销人员：宽带、中高套 ×1.1
+    o(TODAY, "通惠", "新增", "139", community=True),       # 小区营销 ×1.1 已取消（09-29）：照常算
     o(Y, "古南", "新增", "199+5", "云盒"),                  # 昨天的：进累计不进当日
     o(TODAY, "文龙", "新增", "199"),
     o(TODAY, "文龙", "单C", "19山城卡", card=1),
@@ -52,8 +52,8 @@ def test_sum_and_progress():
     t = build_table(CFG, ORDERS, NOW)
     th = row(t, "通惠")
     eq({k: round(v, 3) for k, v in th.cum_done.items()},
-       {"broadband": 3.1, "high": 3.1, "giga": 3.0, "pack": 2.0, "card": 1.0}, "通惠累计：按落地支局加，小区单 ×1.1")
-    eq(round(th.cum_comp * 100, 2), 27.05, "通惠综合 = 31%×25% + 31%×30% + 30%×20% + 20%×15%（套包 10÷10=1 一单） + 10%×10%")
+       {"broadband": 3.0, "high": 3.0, "giga": 3.0, "pack": 2.0, "card": 1.0}, "通惠累计：按落地支局加（小区 ×1.1 已取消）")
+    eq(round(th.cum_comp * 100, 2), 26.5, "通惠综合 = 30%×25% + 30%×30% + 30%×20% + 20%×15%（套包 10÷10=1 一单） + 10%×10%")
     gn = row(t, "古南")
     eq(gn.day_done["broadband"], 0.0, "古南昨天的单不进当日")
     eq(gn.cum_done["broadband"], 1.0, "古南昨天的单进累计")
@@ -117,8 +117,8 @@ def test_total():
     t = build_table(CFG, ORDERS, NOW)
     tot = t["total"]
     eq(tot.cum_target["broadband"], 12.0, "合计目标 = 各支局加总")
-    eq(round(tot.cum_done["broadband"], 2), 7.1, "合计完成 = 各支局加总（认不出的支局不算）")
-    eq(round(tot.cum_prog["broadband"], 4), round(7.1 / 12, 4), "合计进度用加总的数算")
+    eq(round(tot.cum_done["broadband"], 2), 7.0, "合计完成 = 各支局加总（认不出的支局不算）")
+    eq(round(tot.cum_prog["broadband"], 4), round(7.0 / 12, 4), "合计进度用加总的数算")
 
 
 def test_outputs():

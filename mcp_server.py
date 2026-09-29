@@ -120,7 +120,7 @@ def list_orders(period: str = "today", team: str = "", limit: int = 50, region: 
 def roster(query: str = "") -> dict:
     if not regions.multi_enabled(store):
         return tools.roster(query)
-    rs = regions.RosterSet()
+    rs = regions.RosterSet().on(datetime.now().strftime("%Y-%m-%d"))     # 国庆按今天的名单
     q = (query or "").strip()
     if not q:
         return {r: {"活动名册人数": len(rs.activity[r].people), "活动战队": rs.activity[r].teams,
@@ -200,7 +200,7 @@ def checkin_stats(period: str = "today", slot: str = "", team: str = "", region:
     scope = _region(region)
     if getattr(camp, "rosters", None) is not None and scope in regions.REGIONS:
         records = of_region(records, scope)
-        roster = camp.rosters.activity[scope]
+        roster = camp.rosters.on(datetime.now().strftime("%Y-%m-%d")).activity[scope]
     out = summarize(records, roster)
     if team:
         key = team.strip().removesuffix("战队").removesuffix("支局").removesuffix("战区")

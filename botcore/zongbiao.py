@@ -5,7 +5,7 @@
     末行合计，下面一行宽带折算注释
 
 - 所有群里晒的单都算（按人记的主台账），算给【落地支局】（晒单里写的「支局」）；跨区域 6:4 暂不做
-- 一单五项由 kpi.compute 算；发单人是小区 / 场镇营销人员的，新增宽带、中高套 ×1.1
+- 一单五项由 kpi.compute 算（摆展小区 / 场镇 ×1.1 已取消，09-29）
 - 同类排名按【累计】综合完成进度；PK激励按当前名次，综合 >100% 还输的标「（分公司出资）」
 - 合计：目标、完成值各自加总，进度用加总的数算
 - 目标（附件一）在 config.yaml 的 guoqing.targets；没配的格子显示「-」
@@ -88,9 +88,7 @@ def order_kpi(o) -> dict:
     k = kpi.compute(o.kind, o.fee, getattr(o, "loaded", ""), o.card or 1,
                     getattr(o, "up_giga", ""), getattr(o, "up_2000", ""))
     d = k.as_dict()
-    if getattr(o, "community", False):
-        d["broadband"] *= 1.1
-        d["high"] *= 1.1
+    # 摆展小区 / 场镇 ×1.1 取消了（09-29 用户）
     return d
 
 
