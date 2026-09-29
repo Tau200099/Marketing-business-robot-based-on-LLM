@@ -63,7 +63,8 @@ _UPGRADE = re.compile(r"(\d+)\s*(?:改|升档|升|提值|→|->)\s*(\d+)")
 _LIFT = re.compile(r"提值\s*(\d+)")
 # 存量单看【总和】：前后各自「档位 + 附加 − 返费」
 _PART_NUM = re.compile(r"(?<![返])(\d+)")
-_ADDON = re.compile(r"\+\s*(\d+)")
+# 附加值：「+10」「＋10」「加10」「加装10」都算（09-29：只认字，员工不一定打 +）
+_ADDON = re.compile(r"(?:[+＋]|加装|加)\s*(\d+)")
 # 橙分期：「59返30」「99橙分期返55」—— 价值积分 = 月费 − 月返
 # （培训课件的橙分期表就是这么算的：59返30 → 29 分，399 → 199 分）
 _REBATE = re.compile(r"返\s*(\d+)")
@@ -228,6 +229,8 @@ class Order:
     fttr: int = 0                # FTTR
     box: int = 0                 # 云盒/AI视联网/智屏
     loaded: str = ""             # 晒单「是否加载」里勾了哪几样：云盒,AI,智屏,FTTR（国庆版套包分要分清智屏）
+    up_giga: str = ""            # 模板「是否升级千兆/500M」：是 / 否；旧模板没这栏为空（国庆版千五看它）
+    up_2000: str = ""            # 模板「是否升级2000M」：是 / 否；旧模板没这栏为空
     # ---- 多群（09-29 国庆版）：按人分类，一单只记一次，各张表按这几个字段取 ----
     region: str = ""             # 城区 / 农村 / ""（未识别）
     role: str = ""               # 活动 / 非活动 / 未识别（单群模式为空）
@@ -587,7 +590,7 @@ def derive(kind: str, fee: str) -> dict:
     # 新增一条宽带，没有融合档位，不算中高套。
     # 「199+副宽」「99+副宽」是融合套餐带副宽 —— 带「+」的一律不走这里，
     # 由下面的新增分支按主宽 + 副宽数（以前 99/79+副宽 被当成单宽只记 1 条）
-    if _IS_SOLO.search(fee) and not up and "+" not in fee:
+    if _IS_SOLO.search(fee) and not up and not re.search(r"[+＋]|加", fee):
         if kind != "存量":
             out["kind"] = "新增"
             out["broadband"] = 1
@@ -1130,7 +1133,8 @@ _VAL = r"(?!\S*[:：])(\S+)"
 _FIELDS = {
     "branch":    re.compile(r"支" + _SP + r"局" + _SP + r"[:：]" + _SP + _VAL),
     "kind":      re.compile(r"业务类型" + _SP + r"[:：]" + _SP + _VAL),
-    "fee":       re.compile(r"办理套餐" + _SP + r"[:：]" + _SP + _VAL),
+    # 办理套餐取到这一行结尾（「129改139 加10」员工会打空格），再在下一个字段名处截断，见 _fee_value
+    "fee":       re.compile(r"办理套餐" + _SP + r"[:：]" + _SP + r"([^\n\r]*)"),
     "points":    re.compile(r"价值积分" + _SP + r"[:：]" + _SP + r"(\d+)"),
     "cards":     re.compile(r"号卡数量" + _SP + r"[:：]" + _SP + r"(\d+)"),
     "collector": re.compile(r"揽收人" + _SP + r"[:：]" + _SP + _VAL),
@@ -1140,19 +1144,40 @@ _FIELDS = {
 # 值只取一个词，遇到空白或下一个「是否加载」就停。以前用 (.*) 吃到行尾，
 # 两个字段挤一行（「是否加载智屏：否 🌐是否加载FTTR：否」）时智屏那格
 # 抓到「否 🌐是否加载FTTR：否」，不在否定词表里，被判成已加载（对抗测试踩过）
-_LOADED_VAL = r"((?:(?!是否加载)\S)*)"
+_LOADED_VAL = r"((?:(?!是否)\S)*)"
 _LOADED = {
     "ai":   re.compile(r"是否加载" + _SP + r"AI" + _SP + r"[:：]" + _SP + _LOADED_VAL, re.I),
     "box":  re.compile(r"是否加载云盒" + _SP + r"[:：]" + _SP + _LOADED_VAL),
     "scrn": re.compile(r"是否加载智屏" + _SP + r"[:：]" + _SP + _LOADED_VAL),
     "fttr": re.compile(r"是否加载" + _SP + r"FTTR" + _SP + r"[:：]" + _SP + _LOADED_VAL, re.I),
 }
+# 新模板（09-29）两栏：只认「是」，空着 / 否都是否；模板里没这栏（旧模板）记空串
+_UPGRADED = {
+    "up_giga": re.compile(r"是否升级" + _SP + r"(?:千兆|1000" + _SP + r"M?)" + _SP + r"(?:[/／、或]" + _SP + r"500" + _SP + r"(?:M|兆)?)?"
+                          + _SP + r"[:：]" + _SP + _LOADED_VAL, re.I),
+    "up_2000": re.compile(r"是否升级" + _SP + r"(?:2000|两千|二千)" + _SP + r"(?:M|兆)?" + _SP + r"[:：]" + _SP + _LOADED_VAL, re.I),
+}
 # 模板里其它字段名：抓「是否加载」的值时碰到这些就到头了
-_NEXT_FIELD = re.compile(r"揽收人|号卡数量|业务类型|办理套餐|支局|价值积分|业务号码|是否加载|小组")
+_NEXT_FIELD = re.compile(r"揽收人|号卡数量|业务类型|办理套餐|支局|价值积分|业务号码|是否加载|是否升级|小组")
 _NEGATIVE = {"", "无", "否", "没有", "没", "暂无", "无需", "不需要", "不用", "不要", "未加载",
              "未", "不", "n", "no", "none", "x", "×", "不加载", "-", "/", "0"}
 # 以这些字开头的也算否：「未装」「不装」「无此项」「没加」……
 _NEGATIVE_PREFIX = ("未", "不", "无", "没", "否")
+
+
+def _upgraded(text: str, key: str) -> str:
+    """「是否升级千兆/500M：是」→ 是；空着 / 否 → 否；模板里没这一栏 → 空串。"""
+    m = _UPGRADED[key].search(text)
+    if not m:
+        return ""
+    v = re.sub(r"[^\w]", "", _NEXT_FIELD.split(m.group(1), 1)[0])
+    return "是" if v.startswith("是") else "否"
+
+
+def _fee_value(raw: str) -> str:
+    """办理套餐这一行：截到下一个字段名，去掉尾巴上的 emoji / 标点。"""
+    v = _NEXT_FIELD.split(raw or "", 1)[0]
+    return re.sub(r"[^\w）)%]+$", "", v.strip())
 
 
 def _loaded(text: str, key: str) -> bool:
@@ -1184,7 +1209,7 @@ _ASKING = re.compile(r"[?？]|请教|怎么填|填对|对不对|是填|还是填
 # 晒单模板里会出现的字段名。数「命中了几个」来判断一段文字像不像晒单 ——
 # 严格解析失败但命中够多的，交给模型容错解析（见 extract.py）
 _FIELD_WORDS = ("支局", "业务类型", "办理套餐", "套餐", "价值积分", "积分", "号卡数量",
-                "揽收人", "揽收", "是否加载", "业务号码", "晒单")
+                "揽收人", "揽收", "是否加载", "是否升级", "业务号码", "晒单")
 
 
 def looks_like_order(text: str) -> int:
@@ -1202,8 +1227,11 @@ def parse_fields(text: str) -> dict:
     for k, rx in _FIELDS.items():
         m = rx.search(text or "")
         got[k] = m.group(1).strip() if m else ""
+    got["fee"] = _fee_value(got["fee"])
     for k in _LOADED:
         got[k] = _loaded(text or "", k)
+    for k in _UPGRADED:
+        got[k] = _upgraded(text or "", k)
     return got
 
 
@@ -1223,7 +1251,8 @@ def build_order(fields: dict, text: str, msg_id: str = "", at: str = "",
     if re.search(r"[:：]", kind + fee) or kind in _FIELD_WORDS or fee in _FIELD_WORDS:
         return None
 
-    d = derive(kind, fee)
+    from .kpi import strip_speed      # 「139续约升500M」的 500 不是档位（kpi 引用本模块，放函数里免得循环引用）
+    d = derive(kind, strip_speed(fee).strip() or fee)
     raw_kind, kind = kind, normalize_kind(kind)
     # 号卡张数：只看【纠正后】的类型 —— 「业务类型:新增 / 套餐:19山城卡」
     # 经 derive 已经是单C。填了张数用张数，没填按 1 张（模板里这格常留空，
@@ -1254,6 +1283,7 @@ def build_order(fields: dict, text: str, msg_id: str = "", at: str = "",
         fttr=1 if fields.get("fttr") else 0,
         loaded=",".join(n for k, n in (("box", "云盒"), ("ai", "AI"), ("scrn", "智屏"), ("fttr", "FTTR"))
                         if fields.get(k)),
+        up_giga=fields.get("up_giga") or "", up_2000=fields.get("up_2000") or "",
         points=points,
         source=source, msg_id=msg_id,
         # 号码哈希和单号是「同一单重发」的判据；小组成员是照片时代留下的

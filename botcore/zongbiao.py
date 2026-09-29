@@ -84,7 +84,8 @@ def _period(now: datetime) -> tuple[date, date, int]:
 
 def order_kpi(o) -> dict:
     """一单的五项（小区 / 场镇营销人员的新增宽带、中高套 ×1.1）。"""
-    k = kpi.compute(o.kind, o.fee, getattr(o, "loaded", ""), o.card or 1)
+    k = kpi.compute(o.kind, o.fee, getattr(o, "loaded", ""), o.card or 1,
+                    getattr(o, "up_giga", ""), getattr(o, "up_2000", ""))
     d = k.as_dict()
     if getattr(o, "community", False):
         d["broadband"] *= 1.1

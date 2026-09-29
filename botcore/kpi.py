@@ -7,15 +7,18 @@
 晒单【只认字，不靠符号】（员工不一定打「+」「M」「→」）：「129改139加10」「续约139升级五百兆加云盒」「升千兆」都认。
 读不准的记 0 并在 notes 里说明，由总表标黄让人看。
 
+晒单模板里有两栏（09-29 新模板）：「是否升级千兆/500M」「是否升级2000M」—— 只认「是」，空着 / 否都是否，以这两栏为准；
+模板里根本没这两栏（旧模板）才看套餐里的字和档位。
+
 千五（09-29 用户重定）：
   · 新增：看速率 —— 139 及以上融合（含 2000M）、138/198 单宽、1390/1990 包年、副宽 60 各记 1；
           79/99 融合、98 单宽、390/780 包年、副宽 38 不算（加了看家、FTTR 也不算）
-  · 存量迁到 2000M（迁完宽带档位 239/299/399，只看宽带价格）：前后总和比，高迁 1.5 / 平签 1.2 / 低签 1.1
-  · 存量其他：【速率升档】且【提值 ≥10】才记 1。
-          速率先看晒单写的「升500兆 / 升级五百兆 / 升千兆」（写了就算升档），没写按档位查表
-          （79=200M、99/129=300M、139/169=500M、199=千兆）；
-          提值 = 办完的总和 − 原来的总和（付费套包算，权益兑换的不算）
-套包：只有写了「权益 / 兑换 / 金币」的那样算权益兑换，其余都当付费；没写价钱按默认价（FTTR 25、云盒 / AI / 智屏 10、看家 9.9）
+  · 存量 2000M：「是否升级2000M：是」才算，再按前后总和比，高迁 1.5 / 平签 1.2 / 低签 1.1
+  · 存量其他：【速率升档】且【提值 ≥10】才记 1。速率升档看「是否升级千兆/500M」；
+          旧模板没这栏才看套餐里写的「升500兆 / 升千兆」，再没写按档位查表（79=200M、99/129=300M、139/169=500M、199=千兆）；
+          提值 = 办完的总和 − 原来的总和（只算写出来的钱，1 元提速也算）
+套包：只算「办理套餐」里写出来的加装钱（「239+25元FTTR」「239+10」），没写价钱不算；
+      套包分 = 加装钱合计 ÷ 10（9.9 按 10 算），有智屏再加 0.3。1 元提速、副宽、副卡、返费不是套包，权益金兑换没有钱也不算
 
 还在等领导定的：单号卡「剔除直管」—— 现在晒单写了「直管」就不算
 """
@@ -71,22 +74,11 @@ _REBATE = re.compile(r"返\s*(\d+(?:\.\d+)?)")
 _EQUITY_NUM = re.compile(r"(?:权益金?|金币)\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:元|个)?\s*(?:权益|金币|兑换)")
 
 # ---- 套包 ----
-_ITEM_PAT = {
-    "FTTR": re.compile(r"FTTR|光纤到房间", re.I),
-    "云盒": re.compile(r"云盒"),
-    "智屏": re.compile(r"智屏"),
-    "AI": re.compile(r"AI\s*视联网|视联网", re.I),
-    "看家": re.compile(r"看家|守护|摄像头|9\.9"),
-}
-_P = r"(\d{1,2}(?:\.\d+)?)"     # 套包月费 1–2 位数（9.9 / 10 / 25），免得把「139云盒」的 139 当价钱
-_PRICE = {
-    "FTTR": re.compile(rf"(?:FTTR|光纤到房间)\s*(?:加|[+＋])?\s*{_P}(?![\d.])|(?<![\d.]){_P}\s*(?:元\s*)?(?:的\s*)?(?:FTTR|光纤到房间)", re.I),
-    "云盒": re.compile(rf"云盒\s*(?:加|[+＋])?\s*{_P}(?![\d.])|(?<![\d.]){_P}\s*(?:元\s*)?(?:的\s*)?(?:轻)?云盒"),
-    "智屏": re.compile(rf"智屏\s*(?:加|[+＋])?\s*{_P}(?![\d.])|(?<![\d.]){_P}\s*(?:元\s*)?(?:的\s*)?(?:天翼)?智屏"),
-    "AI": re.compile(rf"(?:AI\s*)?视联网\s*(?:加|[+＋])?\s*{_P}(?![\d.])|(?<![\d.]){_P}\s*(?:元\s*)?(?:的\s*)?AI\s*视联网", re.I),
-    "看家": re.compile(rf"(?:看家|守护|摄像头)\s*{_P}(?![\d.])|(?<![\d.]){_P}\s*(?:元\s*)?(?:的\s*)?(?:AI\s*)?(?:看家|守护|摄像头)", re.I),
-}
-_DEFAULT_PRICE = {"云盒": 10.0, "AI": 10.0, "智屏": 10.0, "FTTR": 25.0, "看家": 9.9}
+# 这些钱不是套包：「1元提速」「副宽60 / 60元副宽」「副卡」「返55」
+_NOT_PACK = re.compile(r"(?<![\d.])\d+(?:\.\d+)?\s*元?\s*(?:的\s*)?(?:提速|副宽|副卡)|(?:副宽|副卡)\s*\d+(?:\.\d+)?|返\s*\d+(?:\.\d+)?")
+_SCREEN = re.compile(r"智屏")
+SCREEN_BONUS = 0.3
+MIN_TIER = 39             # 第一个数 < 39 的不是档位，是加装的钱（「10元云盒」「云盒10」）
 
 
 @dataclass
@@ -124,17 +116,35 @@ def _strip_equity_num(m: re.Match) -> str:
     return m.group(0).replace(v, " ", 1)
 
 
+def strip_speed(fee: str) -> str:
+    """剥掉速率的字（「升500兆」「千兆」「500M」），免得 500 / 1000 被当成档位。晒单解析算积分前也用。"""
+    return _SPEED_ANY.sub(" ", _SPEED_UP.sub(" ", fee or ""))
+
+
 def _money_text(fee: str) -> str:
     """剥掉速率（「升500兆」「千兆」）和权益金数字，剩下的数字都是档位和钱。"""
-    s = _SPEED_UP.sub(" ", fee)
-    s = _SPEED_ANY.sub(" ", s)
-    return _EQUITY_NUM.sub(_strip_equity_num, s)
+    return _EQUITY_NUM.sub(_strip_equity_num, strip_speed(fee))
+
+
+def _addon_money(text: str, tier: int) -> float:
+    """一段套餐文字里加装套包的钱：去掉档位（第一个数）、提速 / 副宽 / 副卡 / 返费；9.9 按 10 算。"""
+    nums = [float(x) for x in _NUMF.findall(_NOT_PACK.sub(" ", text))]
+    if tier and nums and nums[0] == tier:
+        nums = nums[1:]
+    return sum(10.0 if abs(v - 9.9) < 1e-6 else v for v in nums)
+
+
+def _flag(v) -> str:
+    """模板「是否升级…」一栏：是 / 否；模板里没这一栏为空串。"""
+    v = (v or "").strip() if isinstance(v, str) else ("是" if v else "")
+    return "" if not v else ("是" if v == "是" else "否")
 
 
 def _total(part: str) -> float:
-    """一段文字里的钱加起来，减掉「返多少」：「139加10」→149，「169返60」→109，「169加9.9看家」→178.9。"""
+    """一段文字里的钱加起来，减掉「返多少」：「139加10」→149，「169返60」→109，「169加9.9看家」→179（9.9 按 10）。"""
     rebate = sum(float(x) for x in _REBATE.findall(part))
-    return sum(float(x) for x in _NUMF.findall(_REBATE.sub(" ", part))) - rebate
+    nums = (float(x) for x in _NUMF.findall(_REBATE.sub(" ", part)))
+    return sum(10.0 if abs(v - 9.9) < 1e-6 else v for v in nums) - rebate      # 9.9 看家按 10 算
 
 
 def _tier_up(money: str) -> re.Match | None:
@@ -179,86 +189,29 @@ _SUB_BB_TEXT = re.compile(r"(?:(?<![\d.])\d{2}\s*元\s*(?:的\s*)?)?副宽\s*(?:
 
 # ---------------------------------------------------------------- 套包
 
-def _items(fee: str, loaded: str) -> list[str]:
-    """这一单加载了哪些套包：晒单「是否加载」勾的 + 套餐里写的字。"""
-    names = [x for x in (loaded or "").split(",") if x]
-    for n, pat in _ITEM_PAT.items():
-        if n not in names and pat.search(fee):
-            names.append(n)
-    return names
-
-
-def _price(name: str, fee: str) -> float | None:
-    """套餐里写了这一样的价钱就返回价钱（「FTTR25」「25元FTTR」「智屏10」「加10云盒」），没写返回 None。"""
-    m = _PRICE[name].search(fee) if name in _PRICE else None
-    if not m:
-        return None
-    v = m.group(1) or m.group(2)
-    return float(v) if v else None
-
-
-def _equity_items(fee: str, names: list[str]) -> set[str]:
-    """
-    哪几样是权益兑换的：只看「权益 / 兑换 / 金币」这几个字挨着哪一样。
-    「兑换FTTR」「权益金兑换云盒」→ 后面那样；「FTTR权益兑换」→ 前面那样；
-    套餐里一样都没写、只勾了加载（「699权益兑换」+ 勾 FTTR）→ 勾的都算兑换。
-    """
-    runs = list(re.finditer(r"(?:权益金?|金币|兑换)(?:\s*(?:权益金?|金币|兑换|\d+(?:\.\d+)?|元|个))*", fee))
-    if not runs:
-        return set()
-    spans = {n: [m.span() for m in _ITEM_PAT[n].finditer(fee)] for n in names if n in _ITEM_PAT}
-    if not any(spans.values()):
-        return set(names)
-    out = set()
-    for r in runs:
-        nxt = [(s - r.end(), n) for n, ss in spans.items() for s, _e in ss if 0 <= s - r.end() <= 3]
-        prv = [(r.start() - e, n) for n, ss in spans.items() for _s, e in ss if 0 <= r.start() - e <= 4]
-        if nxt:
-            out.add(min(nxt)[1])
-        elif prv:
-            out.add(min(prv)[1])
-    return out
-
-
-def _paid_items(fee: str, loaded: str) -> list[tuple[str, float]]:
-    """付了月费的套包 [(名字, 月费)]：写了「权益 / 兑换 / 金币」的那样不算，其余按写的价钱，没写按默认价。"""
-    names = _items(fee, loaded)
-    equity = _equity_items(fee, names)
-    out = []
-    for n in names:
-        if n in equity:
-            continue
-        p = _price(n, fee)
-        out.append((n, p if p is not None else _DEFAULT_PRICE[n]))
-    return out
-
-
-def _mentioned(name: str, text: str) -> bool:
-    pat = _ITEM_PAT.get(name)
-    return bool(pat and pat.search(text))
-
-
-def pack_score(paid: list[tuple[str, float]]) -> float:
-    """套包分：一单月费合计 V，1 + (V − 9.9) ÷ 10（V ≤ 9.9 就是 1）；每台智屏再加 月费 × 0.3。"""
-    v = sum(p for _n, p in paid)
-    if v <= 0:
+def pack_score(money: float, screen: bool = False) -> float:
+    """套包分 = 加装钱合计 ÷ 10，有智屏再加 0.3；没写钱就是 0。例：10云盒 + 10智屏 = 2.3，AI 9.9 = 1，199改199+10+25 = 3.5。"""
+    if money <= 0:
         return 0.0
-    score = 1 + max(0.0, v - 9.9) / 10
-    score += sum(p * 0.3 for n, p in paid if n == "智屏")
-    return score
+    return money / 10 + (SCREEN_BONUS if screen else 0.0)
 
 
 # ---------------------------------------------------------------- 一单 -> 五项
 
-def compute(kind: str, fee: str, loaded: str = "", cards: int = 1) -> KPI:
-    """一单 -> 五项。kind / fee 是晒单里的「业务类型」「办理套餐」原文，loaded 是 Order.loaded。"""
+def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str = "", up_2000: str = "") -> KPI:
+    """
+    一单 -> 五项。kind / fee 是晒单里的「业务类型」「办理套餐」原文，loaded 是 Order.loaded；
+    up_giga / up_2000 是模板「是否升级千兆/500M」「是否升级2000M」：是 / 否，旧模板没这栏为空串。
+    """
     k = KPI()
     fee = _TECH_TAG.sub("", (fee or "").strip())
     kind = normalize_kind(kind)
+    up_giga, up_2000 = _flag(up_giga), _flag(up_2000)
     money = _money_text(fee)
     up = _tier_up(money)
     nums = _NUMF.findall(money)
-    base = int(float(nums[0])) if nums else 0
+    first = int(float(nums[0])) if nums else 0
+    base = first if first >= MIN_TIER else 0      # 「10元云盒」「云盒10」：没写档位，10 是钱
     after_base = int(up.group(2)) if up else base
 
     if _NO_COUNT.search(fee):
@@ -272,7 +225,7 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1) -> KPI:
         if _DIRECT.search(fee):
             k.notes.append("直管不计单号卡")
             return k
-        if after_base >= 19:
+        if (int(up.group(2)) if up else first) >= 19:
             k.card = float(cards or 1)
         return k
 
@@ -281,8 +234,10 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1) -> KPI:
         k.notes.append("权益金兑换不计量")
         return k
 
-    paid = _paid_items(fee, loaded)
-    k.pack = pack_score(paid)
+    # ---- 套包：办完的那部分里写出来的加装钱 ----
+    after_text = money[up.start(2):] if up else money
+    screen = "智屏" in (loaded or "") or bool(_SCREEN.search(fee))
+    k.pack = pack_score(_addon_money(after_text, after_base), screen)
 
     subs = _sub_bbs(fee)
     solo = bool(_SOLO_WORD.search(fee)) or (bool(subs) and not _NUMF.search(_SUB_BB_TEXT.sub(" ", money)))
@@ -312,22 +267,18 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1) -> KPI:
         return k
 
     if kind == "存量":
-        # 迁转前后的宽带档位和总和（总和 = 档位 + 付费套包 − 返费）
-        before_tier = base
-        after_tier = after_base
-        if up:
-            before_total = _total(money[:up.start(2)])
-            after_text = money[up.start(2):]
-        else:
-            before_total = float(base)
-            after_text = money
-        # 套包没写价钱的按默认价补：这次办的付费套包合计比写出来的附加钱多，就按套包算
-        addon_written = _total(after_text) - after_tier
-        addon_paid = sum(p for n, p in paid if _mentioned(n, after_text) or not _mentioned(n, money))
-        after_total = after_tier + max(addon_written, addon_paid)
+        # 迁转前后的宽带档位和总和（总和 = 写出来的档位 + 加装钱 − 返费）
+        before_tier, after_tier = base, after_base
+        before_total = _total(money[:up.start(2)]) if up else float(base)
+        after_total = _total(after_text)
+        sp = _SPEED_UP.search(fee)
 
-        if after_tier >= TIER_2000M and not solo:
-            # 2000M：是不是 2000M 只看宽带价格；高迁 / 平签 / 低签按前后总和比
+        # ---- 2000M：模板「是否升级2000M：是」才算；旧模板没这栏看写的字 / 迁完档位 ----
+        if up_2000:
+            is_2000 = up_2000 == "是"
+        else:
+            is_2000 = (bool(sp) and _speed_value(sp.group("to")) >= 2000) or (after_tier >= TIER_2000M and not solo)
+        if is_2000:
             if up:
                 k.giga = 1.5 if after_total > before_total else (1.2 if after_total == before_total else 1.1)
             elif after_total > before_total or re.search(r"高迁|提值", fee):
@@ -338,10 +289,11 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1) -> KPI:
                 k.giga = 1.2                       # 「299续约」：平签
             return k
 
-        # 其他：速率升档 且 提值 ≥10
-        sp = _SPEED_UP.search(fee)
-        if sp:
-            # 晒单写了「升500兆 / 升千兆」：原来的 139 可能不是 500M，以写的为准
+        # ---- 其他：速率升档 且 提值 ≥10 ----
+        if up_giga:
+            upgraded, after_speed = up_giga == "是", GIGA_SPEED    # 模板这一栏为准
+        elif sp:
+            # 旧模板、套餐里写了「升500兆 / 升千兆」：原来的 139 可能不是 500M，以写的为准
             after_speed = _speed_value(sp.group("to"))
             upgraded = not sp.group("frm") or _speed_value(sp.group("frm")) < after_speed
         else:
@@ -349,8 +301,7 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1) -> KPI:
             upgraded = after_speed > _speed_of(before_tier, solo)
             if not upgraded and _SPEED_HINT.search(fee):
                 k.notes.append("写了提速 / 高迁，没写升到多少兆，千五待核对")
-        lift = after_total - before_total
-        if upgraded and after_speed >= GIGA_SPEED and lift >= GIGA_LIFT:
+        if upgraded and after_speed >= GIGA_SPEED and after_total - before_total >= GIGA_LIFT:
             k.giga = 1.0
         return k
 

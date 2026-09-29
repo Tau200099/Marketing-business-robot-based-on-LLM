@@ -51,8 +51,8 @@ def test_sum_and_progress():
     t = build_table(CFG, ORDERS, NOW)
     th = row(t, "通惠")
     eq({k: round(v, 3) for k, v in th.cum_done.items()},
-       {"broadband": 3.1, "high": 3.1, "giga": 3.0, "pack": 2.02, "card": 1.0}, "通惠累计：按落地支局加，小区单 ×1.1")
-    eq(round(th.cum_comp * 100, 2), 27.08, "通惠综合 = 31%×25% + 31%×30% + 30%×20% + 20.2%×15% + 10%×10%")
+       {"broadband": 3.1, "high": 3.1, "giga": 3.0, "pack": 2.0, "card": 1.0}, "通惠累计：按落地支局加，小区单 ×1.1")
+    eq(round(th.cum_comp * 100, 2), 27.05, "通惠综合 = 31%×25% + 31%×30% + 30%×20% + 20%×15%（套包 10÷10=1 一单） + 10%×10%")
     gn = row(t, "古南")
     eq(gn.day_done["broadband"], 0.0, "古南昨天的单不进当日")
     eq(gn.cum_done["broadband"], 1.0, "古南昨天的单进累计")
