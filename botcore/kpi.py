@@ -346,5 +346,5 @@ def progress(done: dict, target: dict) -> dict:
 
 
 def composite(prog: dict) -> float:
-    """综合完成进度 = Σ 权重 × 进度。【待领导核对算法】"""
+    """综合完成进度 = Σ 权重 × 进度（加权和，09-29 用户确认）。进度先按上面的封顶规则。"""
     return sum(WEIGHTS[k] * prog.get(k, 0.0) for k in WEIGHTS)
