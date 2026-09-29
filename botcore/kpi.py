@@ -90,6 +90,7 @@ class KPI:
     pack: float = 0.0
     card: float = 0.0
     notes: list = field(default_factory=list)
+    giga_lines: int = 0      # 千五达标的宽带有几条（不乘 2000M 系数）：活动群的「千兆/500M」按这个数（09-29 用户定）
 
     def as_dict(self) -> dict:
         return {k: round(getattr(self, k), 4) for k in WEIGHTS}
@@ -271,6 +272,7 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
             else:                                  # 单宽 / 包年：138/198/1390/1990 是 500M 以上
                 k.broadband = fold
                 k.giga = 1.0 if base in SOLO_GIGA_TIERS else 0.0
+            k.giga_lines = int(k.giga)
             return k
         k.broadband = fold * (1 + len(subs))
         # ---- 中高套（只算新增融合）----
@@ -281,6 +283,7 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
             k.high = 1.0
         # ---- 千五：每条宽带各算一次；融合 139 及以上 500M 起，副宽 60 另算 ----
         k.giga = (1.0 if after_base >= HIGH_TIER_MIN else 0.0) + sum(subs)
+        k.giga_lines = int(k.giga)
         return k
 
     if kind == "存量":
@@ -313,6 +316,7 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
             else:
                 g = 1.2                            # 「299续约」：平签
             k.giga = g + sub_giga
+            k.giga_lines = 1 + int(sub_giga)       # 2000M 高迁 / 平签 / 低签在活动群都记 1 条
             return k
 
         # ---- 其他：速率升档 且 提值 ≥10 ----
@@ -329,6 +333,7 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
                 k.notes.append("写了提速 / 高迁，没写升到多少兆，千五待核对")
         main_giga = 1.0 if upgraded and after_speed >= GIGA_SPEED and after_total - before_total >= GIGA_LIFT else 0.0
         k.giga = main_giga + sub_giga
+        k.giga_lines = int(main_giga + sub_giga)
         return k
 
     k.notes.append(f"业务类型「{kind}」认不出，五项都记 0")

@@ -158,7 +158,7 @@ def _font(size: int, bold: bool = False):
 
 
 def render_png(groups: list[GroupStat], teams: list[TeamStat], targets: Targets,
-               title: str) -> bytes:
+               title: str, note: str = "") -> bytes:
     """
     把「晒单数据」画成一张 PNG。布局照 Excel 那张表：
     标题 / 表头 / 每战队一块（小组行 + 合计行），战区、进度、排名在块内居中。
@@ -171,7 +171,7 @@ def render_png(groups: list[GroupStat], teams: list[TeamStat], targets: Targets,
     table_w = sum(widths)
     n_rows = len(groups) + len({g.team for g in groups})      # 小组行 + 每队一行合计
     W = table_w + pad * 2
-    H = title_h + head_h + row_h * n_rows + foot_h + pad * 2
+    H = title_h + head_h + row_h * n_rows + foot_h + pad * 2 + (30 if note else 0)
 
     img = Image.new("RGB", (W, H), "white")
     d = ImageDraw.Draw(img)
@@ -259,6 +259,8 @@ def render_png(groups: list[GroupStat], teams: list[TeamStat], targets: Targets,
             f"云盒/AI/智屏 {targets.box}（{targets.w_box:.0%}）  "
             f"价值积分 {targets.points}（{targets.w_points:.0%}）")
     d.text((pad, y + 12), foot, font=_font(17), fill=(108, 117, 125))
+    if note:
+        d.text((pad, y + 42), note, font=_font(17), fill=(108, 117, 125))
 
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
@@ -531,7 +533,10 @@ class Bulletin:
         title = summary_title(camp_cfg.period_label("rank", now), camp_cfg.title, now)
 
         text = bulletin_text(teams, cfg, camp_cfg, now)
-        png = render_png(groups, teams, camp.targets, title) if cfg.with_image else b""
+        # 多群模式：图底下说清楚这张表只算本群活动人员、按条数（09-29 用户：两张图底下加说明）
+        note = ("注：只统计本群活动人员的晒单，按晒单人所在小组；新增宽带、千兆/500M 按条数计，不乘国庆活动的折算和系数"
+                if region else "")
+        png = render_png(groups, teams, camp.targets, title, note) if cfg.with_image else b""
 
         # Excel 每次都生成、落在 reports/（09-14 定的「Excel 不进群，只落 reports」）；
         # 发不发到群里由 with_excel 管

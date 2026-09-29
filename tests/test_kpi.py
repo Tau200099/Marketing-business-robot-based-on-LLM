@@ -185,6 +185,29 @@ def test_template():
     eq((o.broadband, o.giga), (2, 2), "活动群：新增199加副宽60 → 宽带 2、千兆 2（每条宽带各算）")
 
 
+def test_activity_group_counts():
+    """09-29 用户定：活动群和总表判定统一、计数不同 —— 活动群千兆只数条数、不乘 2000M 系数；新增宽带只数条数。"""
+    cases = [
+        ("存量 139+10 云盒，升千兆是", "存量", "139+10", "云盒", Y, N, 1.0, 1),
+        ("存量 199改239，升2000M是（高迁）", "存量", "199改239", "", N, Y, 1.5, 1),
+        ("存量 299续约，升2000M是（平签）", "存量", "299续约", "", N, Y, 1.2, 1),
+        ("存量 199改239加副宽60，升2000M是", "存量", "199改239加副宽60", "", N, Y, 2.5, 2),
+        ("新增 199+副宽60", "新增", "199+副宽60", "", N, N, 2.0, 2),
+        ("存量 139+10，没升", "存量", "139+10", "云盒", N, N, 0.0, 0),
+    ]
+    for name, kind, fee, loaded, ug, u2, total, lines in cases:
+        k = compute(kind, fee, loaded, 1, ug, u2)
+        eq((round(k.giga, 2), k.giga_lines), (total, lines), f"{name}：总表千五 {total}、活动群 {lines} 条")
+    t = NEW_TEMPLATE.replace("129改139 加10元云盒", "199改239").replace("👏是否升级千兆/500M:是", "👏是否升级千兆/500M:否")
+    o = parse_order(t.replace("👏是否升级2000M:", "👏是否升级2000M:是"))
+    eq(o.giga, 1, "活动群：存量 199改239 升2000M 记 1（不是 1.5）")
+    o = parse_order(NEW_TEMPLATE.replace("129改139 加10元云盒", "139+10"))
+    eq((o.giga, o.note), (1, ""), "活动群：存量 139+10 升千兆是 记 1，不再标「千兆待核对」")
+    o = parse_order(NEW_TEMPLATE.replace("存量", "新增").replace("129改139 加10元云盒", "780包年"))
+    eq(o.broadband, 1, "活动群：780 包年新增宽带按条数记 1（总表才按 3:1 折）")
+    eq(round(compute("新增", "780包年").broadband, 2), 0.33, "总表：780 包年 = 1/3 条")
+
+
 def test_progress_composite():
     """功能说明 5.2 的例子：通惠累计（目标是编的）→ 综合 103.35%（加权和，暂定）。"""
     target = {"broadband": 20, "high": 15, "giga": 20, "pack": 30, "card": 10}
@@ -201,5 +224,6 @@ run(test_table)
 run(test_pack_formula)
 run(test_notes)
 run(test_template)
+run(test_activity_group_counts)
 run(test_progress_composite)
 done()

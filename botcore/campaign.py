@@ -1310,25 +1310,15 @@ def build_order(fields: dict, text: str, msg_id: str = "", at: str = "",
         contact=_contact_key(text), members=_members_of(text),
         serial=_serial_of(text),
     )
-    # 千兆/500兆：晒单模板里没有这个字段，只能按档位推。
-    # 而实测存量升档到 139 未必有千兆（原表 129改139 是 0），
-    # 所以只对【新增】且档位够的才算，存量的标待核对。
-    # ⚠️ 要用 derive 纠正后的类型：「新增 / 399橙分期」纠正后是单C，
-    # 号卡的 399 是月费不是带宽，按原始类型判会把手机卡记成千兆宽带（实测踩过）
-    if d.get("kind") == "单C":
-        pass
-    elif d.get("solo"):
-        # 单宽 / 包年查表：390 包年只有 50M，1390 包年才是 500M（以前按数字 ≥139 记，全错）
-        o.giga = 1 if (d.get("solo_giga") and d.get("kind") == "新增") else 0
-    elif d.get("kind") == "新增" and d["tier"] >= HIGH_TIER_MIN:
-        o.giga = 1
-    elif d["tier"] >= HIGH_TIER_MIN:
+    # 千兆/500兆（活动群的数）：和攻坚群总表同一套判定（kpi：新增看速率；存量看「是否升级」栏 + 提值 ≥10；
+    # 副宽 60 另算），但【只数条数、不乘国庆系数】—— 2000M 高迁 / 平签 / 低签在活动群都记 1（09-29 用户定）。
+    # ⚠️ 用 derive 纠正后的类型：「新增 / 399橙分期」纠正后是单C，不算宽带
+    from .kpi import compute as kpi_compute
+    k = kpi_compute(o.kind, fee, o.loaded, o.card or 1, o.up_giga, o.up_2000)
+    o.giga = k.giga_lines
+    if any("待核对" in n for n in k.notes):
         o.needs_review = True
-        o.note = "千兆待核对"
-    # 副宽：每条 60 元（500M）的副宽另记 1 条千兆，新增、存量都算（09-29 用户定）；单办副宽就只数副宽
-    if d.get("kind") in ("新增", "存量") and _SUB_BB.search(fee):
-        fast = sum(sub_broadbands(fee))
-        o.giga = fast if d.get("solo") else o.giga + fast
+        o.note = (o.note + " " + "；".join(n for n in k.notes if "待核对" in n)).strip()
     # 业务类型写了个认不出的词（既不像新增也不像存量/单C）：
     # 照原文记，标出来让人看一眼，别让它悄悄按 0 计
     # 「业务类型:新增 / 套餐:109改139」：新增不该有「改」，用户会上强调别这样报（09-29）；出现了照算，标黄让人核对
