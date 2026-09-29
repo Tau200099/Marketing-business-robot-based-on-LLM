@@ -207,6 +207,7 @@ class Pipeline:
         self._roster_pending: dict[tuple[str, str], tuple[str, float]] = {}   # (会话, 人) -> (哪张名册, 过期)
         # 单聊照片「收到了还没回执」的：重启时挨个告诉他重发，不悄悄丢（09-29）
         self._inflight_photos: dict[str, InboundMessage] = {}
+        self._tls = threading.local()           # 问答助手：这条消息所在的群 → 查哪个区
         self._inflight_lock = threading.Lock()
         # 支局长打卡点检（人脸）：每张打卡照都过一遍，认出支局长就记下时间（09-29）
         from .chiefs import ChiefBoard
@@ -950,7 +951,12 @@ class Pipeline:
             return False
 
         log.info("助手收到提问 | %s | %s", msg.sender_name or msg.sender_id, text[:60])
-        answer = assistant.ask(msg.text.strip(), msg.chat_id, msg.sender_name)
+        # 城区群按城区、农村群按农村、攻坚群 / 单聊按全部（09-29）：助手查数时取的台账跟着这个走
+        self._tls.scope = regions.scope_of_chat(self.store, msg.chat_type, msg.chat_id)
+        try:
+            answer = assistant.ask(msg.text.strip(), msg.chat_id, msg.sender_name)
+        finally:
+            self._tls.scope = None
         if answer is None:
             if cfg.error_reply:
                 self.platform.reply(msg, cfg.error_reply, msg.sender_id if cfg.at_sender else None)
@@ -966,6 +972,12 @@ class Pipeline:
                      (time.perf_counter() - t0) * 1000, answer[:60].replace("\n", " "))
         return True
 
+    def _assistant_campaign(self) -> Campaign:
+        """问答助手的台账：按当前这条消息所在的群分区（见 _ask_assistant）。"""
+        camp = self.campaign()
+        scope = getattr(self._tls, "scope", None)
+        return regions.scoped(camp, self.store, scope) if scope else camp
+
     def _get_assistant(self, cfg: AssistantSettings) -> Assistant | None:
         if self._assistant is not None and self._assistant_key is cfg:
             return self._assistant
@@ -975,7 +987,7 @@ class Pipeline:
             log.error("assistant 已开启，但环境变量 %s 为空", cfg.api_key_env or llm.api_key_env)
             self._assistant, self._assistant_key = None, cfg
             return None
-        self._assistant = Assistant(cfg, llm, api_key, self.campaign,
+        self._assistant = Assistant(cfg, llm, api_key, self._assistant_campaign,
                                     self.store.campaign_settings, self.bulletin)
         self._assistant_key = cfg
         log.info("问答助手已启用：%s @ %s", self._assistant.model, self._assistant.base_url)

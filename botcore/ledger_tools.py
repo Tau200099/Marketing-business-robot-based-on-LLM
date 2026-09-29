@@ -123,7 +123,8 @@ class LedgerTools:
         since, until, label = resolve_period(period)
         camp: Campaign = self._campaign()
         cfg: CampaignSettings = self._camp_cfg()
-        camp.targets = cfg.targets
+        if not getattr(camp, "_readonly", False):
+            camp.targets = cfg.targets      # 区域视图自带那个区的目标（农村和城区不一样），别拿城区的盖掉
         rows = []
         for t in camp.stats(since, until):
             # 进度为 0 的不给名次 —— 六个 0 分硬排出 1~6 名，说出去像在点名
@@ -134,6 +135,12 @@ class LedgerTools:
                          "长续约": t.renew, "千兆": t.giga, "单号卡": t.card,
                          "云盒AI智屏": t.box, "积分": t.points, "待核对": t.pending})
         tg = camp.targets
+        if getattr(camp.roster, "ALL", None):
+            # 「全部」视图（按支局汇总）：只列数量；支局综合进度、排名、PK 看总表
+            return {"范围": label, "活动": cfg.title,
+                    "说明": "按支局汇总所有人的单（落地支局）；支局综合完成进度、同类排名、PK 看支局总表",
+                    "支局": [{k: v for k, v in r.items() if k not in ("排名", "综合进度")} | {"支局": r["战队"]}
+                            for r in rows]}
         return {"范围": label, "活动": cfg.title,
                 "目标": {"新增宽带": tg.broadband, "中高套": tg.high,
                          "云盒AI智屏": tg.box, "积分": tg.points},
@@ -164,7 +171,8 @@ class LedgerTools:
         with camp._lock:
             orders = [o for o in camp.orders
                       if since <= o.at <= until
-                      and (o.collector == name or name in _split_members(o.members))]
+                      and (o.collector == name or getattr(o, "poster", "") == name
+                           or name in _split_members(o.members))]
         return {"姓名": name, "小组": grp or "不在名册", "战队": team or "不在名册",
                 "范围": label, "单数": len(orders),
                 "积分": sum(o.points for o in orders),

@@ -42,7 +42,8 @@ log = logging.getLogger("mcp_server")
 from mcp.server.mcpserver import MCPServer  # noqa: E402
 
 from botcore.bulletin import bulletin_text, render_png  # noqa: E402
-from botcore.checkin import day_sheets, load_records, select, summarize  # noqa: E402
+from botcore import regions  # noqa: E402
+from botcore.checkin import day_sheets, load_records, of_region, select, summarize  # noqa: E402
 from botcore.campaign import (Campaign, NotRosterSheet, Roster, RosterImportError,  # noqa: E402
                               parse_order)
 from botcore.config import ConfigStore, load_env  # noqa: E402
@@ -55,13 +56,31 @@ store = ConfigStore()
 
 
 def _campaign() -> Campaign:
-    """每次都重新读文件：台账是机器人进程在写，这边不能缓存。"""
+    """每次都重新读文件：台账是机器人进程在写，这边不能缓存。多群模式带上四张名册（按人分城区 / 农村）。"""
     # config.yaml 改了目标值 / 活动名，这个长跑进程也要跟上（以前要重启 TeleAgent 才生效）
     store.maybe_reload()
+    if regions.multi_enabled(store):
+        rs = regions.RosterSet()
+        return Campaign(rs.activity[regions.CITY], store.campaign_settings().targets, rosters=rs)
     return Campaign(Roster(), store.campaign_settings().targets)
 
 
-tools = LedgerTools(_campaign, store.campaign_settings)
+def _region(region: str) -> str:
+    """区域参数：城区 / 农村 / 全部（默认全部）；写成「城区活动」「农村的」也认。"""
+    r = (region or "").strip()
+    for x in regions.SCOPES:
+        if x in r:
+            return x
+    return regions.ALL
+
+
+def _tools(region: str = "") -> LedgerTools:
+    scope = _region(region)
+    return LedgerTools(lambda: regions.scoped(_campaign(), store, scope), store.campaign_settings)
+
+
+tools = _tools()
+_REGION_DOC = "region：城区 / 农村 / 全部（默认全部 = 所有人的单按落地支局汇总）。"
 
 server = MCPServer(
     name="yeji-ledger",
@@ -75,35 +94,49 @@ server = MCPServer(
 )
 
 
-@server.tool(description="各战队汇总：新增宽带、中高套、长续约、千兆、单号卡、云盒、积分、单数、综合进度、排名，以及目标值。")
-def team_stats(period: str = "today") -> dict:
-    return tools.team_stats(period)
+@server.tool(description="各战队（城区 / 农村活动）或各支局（全部）汇总：新增宽带、中高套、长续约、千兆、单号卡、云盒、积分、单数，"
+                         "活动的还有综合进度、排名和目标值。" + _REGION_DOC)
+def team_stats(period: str = "today", region: str = "全部") -> dict:
+    return _tools(region).team_stats(period)
 
 
-@server.tool(description="各小组汇总（每组两人）。team 可只看某个战队；only_zero=true 只列一单都没有的小组。")
-def group_stats(period: str = "today", team: str = "", only_zero: bool = False) -> dict:
-    return tools.group_stats(period, team, only_zero)
+@server.tool(description="各小组汇总（活动小组）。team 可只看某个战队；only_zero=true 只列一单都没有的小组。"
+                         "region：城区 / 农村（全部时按支局，每个支局一行）。")
+def group_stats(period: str = "today", team: str = "", only_zero: bool = False, region: str = "城区") -> dict:
+    return _tools(region).group_stats(period, team, only_zero)
 
 
-@server.tool(description="某个人的业绩：单数、积分、每一单明细，以及他在名册里的小组和战队。")
+@server.tool(description="某个人的业绩：单数、积分、每一单明细（他晒的或揽收的），以及他在名册里的小组和战队 / 支局。")
 def person_stats(name: str, period: str = "today") -> dict:
-    return tools.person_stats(name, period)
+    return _tools(regions.ALL).person_stats(name, period)
 
 
-@server.tool(description="按时间倒序列出清单里的单：时间、类型、套餐、揽收人、战队、小组、积分。team 可过滤。")
-def list_orders(period: str = "today", team: str = "", limit: int = 50) -> dict:
-    return tools.list_orders(period, team, limit)
+@server.tool(description="按时间倒序列出清单里的单：时间、类型、套餐、揽收人、战队 / 支局、小组、积分。team 可过滤。" + _REGION_DOC)
+def list_orders(period: str = "today", team: str = "", limit: int = 50, region: str = "全部") -> dict:
+    return _tools(region).list_orders(period, team, limit)
 
 
-@server.tool(description="查名册：某人在哪个小组和战队；或某战队有哪些小组和成员；query 留空返回所有战队。")
+@server.tool(description="查名册：某人是哪一类（城区 / 农村，活动 / 非活动）、哪个支局、哪个小组；query 留空返回四张名册和支局长名单的人数。")
 def roster(query: str = "") -> dict:
-    return tools.roster(query)
+    if not regions.multi_enabled(store):
+        return tools.roster(query)
+    rs = regions.RosterSet()
+    q = (query or "").strip()
+    if not q:
+        return {r: {"活动名册人数": len(rs.activity[r].people), "活动战队": rs.activity[r].teams,
+                    "支局名册人数": len(rs.branch[r].people)} for r in regions.REGIONS} | \
+               {"支局长": len(rs.chiefs.chiefs)}
+    i = rs.identify_name(q)
+    if i.role == regions.UNKNOWN:
+        return {"error": f"四张名册里都没有「{q}」"}
+    return {"姓名": q, "区域": i.region, "类别": i.role, "支局": i.branch, "战队": i.team, "小组": i.group,
+            "小区场镇营销": i.community, "支局长": bool(rs.chiefs.of(q))}
 
 
-@server.tool(description="生成业绩通报的文字（前两名恭喜、末两名加油）。")
-def bulletin_message(period: str = "today") -> dict:
+@server.tool(description="生成活动群业绩通报的文字（前两名恭喜、末两名加油）。region：城区 / 农村。")
+def bulletin_message(period: str = "today", region: str = "城区") -> dict:
     since, until, label = resolve_period(period)
-    camp = _campaign()
+    camp = regions.scoped(_campaign(), store, _region(region))
     teams = camp.stats(since, until)
     # 查的是过去某天就按那天的 23:59 落款，别写成今天
     now = datetime.now()
@@ -114,12 +147,14 @@ def bulletin_message(period: str = "today") -> dict:
 
 
 @server.tool(description="生成 Excel（「晒单数据」+「清单」两张表，打卡核验开着时再加排名那天上午/下午/晚上三张「打卡」表）"
-                         "和表格图 PNG，返回文件路径。rank_period 是排名范围，ledger_period 是清单范围。")
-def export_report(rank_period: str = "today", ledger_period: str = "week") -> dict:
+                         "和表格图 PNG，返回文件路径。rank_period 是排名范围，ledger_period 是清单范围。"
+                         "region：城区 / 农村（活动群那种表）；全部 = 所有人的单按支局。攻坚群的支局总表用 guoqing_total。")
+def export_report(rank_period: str = "today", ledger_period: str = "week", region: str = "城区") -> dict:
     now = datetime.now()
     r_since, r_until, r_label = resolve_period(rank_period, now)
     l_since, l_until, l_label = resolve_period(ledger_period, now)
-    camp = _campaign()
+    scope = _region(region)
+    camp = regions.scoped(_campaign(), store, scope)
     cfg = store.campaign_settings()
     # 「今天（9.22）」取括号里的；「9.8 至 9.14」写成「9.8-9.14」，
     # 不然标题拼出来是「9.8 至 9.14日各支局…」
@@ -127,9 +162,10 @@ def export_report(rank_period: str = "today", ledger_period: str = "week") -> di
     title = summary_title(period.replace(" 至 ", "-"), cfg.title, now)
     out_dir = DATA / store.bulletin_settings().out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
-    stem = f"业绩通报_{now:%m%d_%H%M%S}"
+    stem = f"业绩通报_{scope}_{now:%m%d_%H%M%S}"
     ck = store.checkin_settings()
-    sheets = day_sheets(ck, r_until[:10], cfg.title) if ck.enabled else None
+    area = scope if scope in regions.REGIONS else None
+    sheets = day_sheets(ck, r_until[:10], cfg.title, area) if ck.enabled else None
     xlsx = build_workbook(camp, out_dir / f"{stem}.xlsx", title,
                           rank=(r_since, r_until), ledger=(l_since, l_until),
                           checkin_sheets=sheets, checkin_columns=ck.columns)
@@ -154,13 +190,18 @@ def parse_order_text(text: str) -> dict:
 
 @server.tool(description="打卡情况：每张今日水印照片算一次打卡。按小组统计业务打卡（工作内容里有办成的业务，表里标绿）、"
                          "有效打卡（现场拦截/设备演示/板夹/算账等）、无效打卡（标红）、待判定，并列出一条打卡都没有的小组。"
-                         "slot 可填 上午 / 下午 / 晚上，留空是全天；team 可只看某个战队。")
-def checkin_stats(period: str = "today", slot: str = "", team: str = "") -> dict:
+                         "slot 可填 上午 / 下午 / 晚上，留空是全天；team 可只看某个战队；region：城区 / 农村（只有活动人员打卡）。")
+def checkin_stats(period: str = "today", slot: str = "", team: str = "", region: str = "城区") -> dict:
     since, until, label = resolve_period(period)
     ck = store.checkin_settings()
     records = select(load_records(DATA / ck.store_file), slot=slot, since=since, until=until, slots=ck.slots)
     camp = _campaign()
-    out = summarize(records, camp.roster)
+    roster = camp.roster
+    scope = _region(region)
+    if getattr(camp, "rosters", None) is not None and scope in regions.REGIONS:
+        records = of_region(records, scope)
+        roster = camp.rosters.activity[scope]
+    out = summarize(records, roster)
     if team:
         key = team.strip().removesuffix("战队").removesuffix("支局").removesuffix("战区")
         out["各小组"] = [g for g in out["各小组"] if key in g["战队"]]
@@ -200,19 +241,70 @@ def send_bulletin_to_group() -> dict:
     return {"ok": True, "发到": res["ok"]}
 
 
-@server.tool(description="从 Excel 文件更新名册（姓名 | 分组 | 战区 三列的「分组」sheet）。path 是本机文件路径。机器人会自动按新名册重新归队。")
-def import_roster(path: str) -> dict:
+@server.tool(description="从 Excel 文件更新名册。which 是哪张：城区活动名册（默认，姓名 | 分组 | 战区）/ 农村活动名册 / "
+                         "城区支局名册 / 农村支局名册（姓名 | 支局，可带小区营销列）/ 支局长名单（类别 | 支局 | 支局长）。"
+                         "path 是本机文件路径。机器人会自动按新名册重新归类。")
+def import_roster(path: str, which: str = "城区活动名册") -> dict:
     p = Path(path)
     if not p.is_file():
         return {"error": f"文件不存在：{path}"}
-    # 只改名册文件，不碰台账：台账由机器人进程按新名册重新归队（它看 roster.json 的 mtime）
+    # 只改名册文件，不碰台账：台账由机器人进程按新名册重新归队（它看名册文件的 mtime）
     try:
-        summary = Roster().import_workbook(p.read_bytes())
+        if which != "城区活动名册" or regions.multi_enabled(store):
+            if which not in regions.ROSTER_COMMANDS:
+                return {"error": f"which 要是其中之一：{'、'.join(regions.ROSTER_COMMANDS)}"}
+            summary = regions.RosterSet().import_named(which, p.read_bytes())
+        else:
+            summary = Roster().import_workbook(p.read_bytes())
     except NotRosterSheet:
         return {"error": "这个 Excel 里没有「分组」sheet（姓名 | 分组 | 战区 三列），不是名册表，名册没动"}
     except RosterImportError as exc:
         return {"error": f"名册没更新成：{exc}"}
     return {"ok": True, "名册": summary, "说明": "机器人进程会在下一次记单 / 通报时按新名册重新归队"}
+
+
+@server.tool(description="攻坚群支局总表（国庆营销活动）：17 个支局按一 / 二 / 三类，当日和累计的新增宽带、中高套、千兆500兆、套包、单号卡"
+                         "目标 / 完成 / 进度、综合完成进度、同类排名、PK激励，以及合计。同时导出 Excel 和表格图，返回路径。"
+                         "day 可填 today / yesterday / YYYY-MM-DD（那天结束时的样子）。")
+def guoqing_total(day: str = "today") -> dict:
+    from botcore import zongbiao
+    since, until, label = resolve_period(day)
+    now = datetime.now()
+    at = now if until[:10] >= now.strftime("%Y-%m-%d") else datetime.strptime(until, "%Y-%m-%d %H:%M:%S")
+    camp = _campaign()
+    table = zongbiao.build_table(store.guoqing_settings(), list(camp.orders), at)
+    out_dir = DATA / store.bulletin_settings().out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"支局总表_{at:%m%d_%H%M}"
+    (out_dir / f"{stem}.png").write_bytes(zongbiao.render_png(table))
+    xlsx = zongbiao.build_excel(store, camp, at.date(), out_dir / f"{stem}.xlsx")
+    rows = [{"分类": r.cls, "支局": r.branch, "累计综合进度": f"{r.cum_comp:.1%}", "当日综合进度": f"{r.day_comp:.1%}",
+             "同类排名": r.rank or None, "PK激励": r.pk,
+             "累计完成": {k: round(v, 2) for k, v in r.cum_done.items()}} for r in table["rows"]]
+    return {"范围": label, "说明": zongbiao.caption(table), "支局": rows,
+            "excel": str(xlsx), "png": str(out_dir / f"{stem}.png")}
+
+
+@server.tool(description="支局长打卡点检表（人脸识别）：每个支局长的早会、中午集合时间和第几户上门的时间，自行打卡 / 未打卡 / 休息，"
+                         "下午没上门的名字标红。导出 Excel 和图片，返回路径。day 可填 today / yesterday / YYYY-MM-DD。")
+def chief_checkin(day: str = "today") -> dict:
+    from botcore import chiefs, faces
+    since, until, label = resolve_period(day)
+    now = datetime.now()
+    d = until[:10]
+    at = now if d >= now.strftime("%Y-%m-%d") else datetime.strptime(until, "%Y-%m-%d %H:%M:%S")
+    board = chiefs.ChiefBoard(faces.FaceIndex(), regions.RosterSet(), store)
+    rows = board.rows(d, at)
+    out_dir = DATA / store.bulletin_settings().out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"支局长点检_{d}_{at:%H%M}"
+    (out_dir / f"{stem}.png").write_bytes(board.render_png(d, at))
+    from datetime import date as _date
+    xlsx = chiefs.build_excel(store, None, _date.fromisoformat(d), out_dir / f"{stem}.xlsx")
+    return {"范围": label, "标题": board.title(d, at),
+            "支局长": [{"类别": r.cls, "支局": r.branch, "支局长": r.name, "早会": r.early, "中午集合": r.noon,
+                      "上门": r.visits, "名字标红": r.red_name} for r in rows],
+            "excel": str(xlsx), "png": str(out_dir / f"{stem}.png")}
 
 
 def _self_check() -> int:

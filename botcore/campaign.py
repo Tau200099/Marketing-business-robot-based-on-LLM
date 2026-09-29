@@ -36,7 +36,7 @@ import json
 import logging
 import re
 import threading
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -694,6 +694,31 @@ class TeamStat:
     rank: int = 0
 
 
+class BranchRoster:
+    """「全部」视图用的名册：战队 = 支局（按总表分类的顺序），每个支局一个「全支局」小组；查人走四张名册。"""
+    ALL = "（按支局汇总）"
+
+    def __init__(self, branches, rosters=None) -> None:
+        self.teams = list(branches)
+        self.people: dict = {}
+        self._rs = rosters
+
+    def normalize_team(self, name: str) -> str:
+        return (name or "").strip()
+
+    def lookup(self, person: str) -> tuple[str, str]:
+        if self._rs is None:
+            return "", ""
+        i = self._rs.identify_name(person)
+        return (i.group or i.region + i.role, i.branch) if i.role != "未识别" else ("", "")
+
+    def groups(self) -> list:
+        return [GroupInfo(team=b, label="全支局", members=self.ALL) for b in self.teams]
+
+    def maybe_reload(self) -> bool:
+        return False
+
+
 class Campaign:
     """一次活动的全部订单 + 汇总。落盘，跨重启不丢。"""
 
@@ -762,6 +787,23 @@ class Campaign:
         if changed:
             moved = self.reassign()
             log.info("按新名册重新归队：%d 单有变化", moved)
+
+    def view_all(self, branches: list) -> "Campaign":
+        """
+        全部人的单按【落地支局】汇总（攻坚群问答、TeleAgent「全部」用，和总表一个口径）。只读。
+        每一单复制一份把 战队 换成支局，原单不动。
+        """
+        v = Campaign.__new__(Campaign)
+        v.rosters = None
+        v._readonly = True
+        v.roster = BranchRoster(branches, self.rosters)
+        v.targets = Targets()
+        v.path = self.path
+        v._seen = set()
+        v._lock = threading.Lock()
+        with self._lock:
+            v.orders = [replace(o, team=o.branch or "未归属", group=BranchRoster.ALL) for o in self.orders]
+        return v
 
     def view(self, region: str, targets: "Targets | None" = None) -> "Campaign":
         """

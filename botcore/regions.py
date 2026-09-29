@@ -79,6 +79,32 @@ def role_chats(store, role: str) -> tuple[str, ...]:
 
 
 REGION_OF_ROLE = {"city": CITY, "rural": RURAL}
+ALL = "全部"
+SCOPES = (CITY, RURAL, ALL)
+
+
+def scoped(camp, store, scope: str | None):
+    """
+    查数用的台账：城区 / 农村 = 那个区活动人员的单（那个区的名册和目标）；全部 = 所有人的单按支局汇总。
+    单群模式（没有四张名册）原样返回。
+    """
+    if getattr(camp, "rosters", None) is None:
+        return camp
+    if scope in REGIONS:
+        return camp.view(scope, store.campaign_settings().targets_for(scope))
+    try:
+        branches = [b for bs in store.guoqing_settings().classes.values() for b in bs]
+    except Exception:
+        branches = []
+    return camp.view_all(branches)
+
+
+def scope_of_chat(store, chat_type: str, chat_id: str) -> str | None:
+    """问答：城区群 → 城区，农村群 → 农村，攻坚群 / 单聊 → 全部；单群模式 None。"""
+    if not multi_enabled(store):
+        return None
+    role = group_role(store, chat_id) if chat_type != "p2p" else ""
+    return REGION_OF_ROLE.get(role, ALL)
 
 
 # ---------------- Excel 读表头 ----------------
