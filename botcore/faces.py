@@ -42,6 +42,12 @@ THRESHOLD = 0.363
 MAX_PER_PERSON = 5
 MAX_SIDE = 1280           # 检测前把大图缩到这么大，手机原图太大又慢又占内存
 MIN_SCORE = 0.8           # 人脸检测置信度
+# 录入把关（09-29 用用户本人照片校准，见 docs/支局长打卡拍照标准.md）：
+#   侧脸程度 = 鼻尖偏离两眼中点 ÷ 两眼距离。正面自拍 0.10；认得出的 3/4 侧脸 0.70；认不出的低头侧身 1.9、背对 4.0
+#   录入要比认人严：侧脸 ≤ 0.5、脸宽 ≥ 100 像素（缩到 1280 以后；正面自拍 383，3 米外活动照 73）
+ENROLL_MAX_YAW = 0.5
+ENROLL_MIN_WIDTH = 100
+ENROLL_SUGGEST = 3        # 建议每人录几张：1 正脸 + 左右各侧一点
 
 
 class FaceError(Exception):
@@ -72,6 +78,10 @@ class FaceIndex:
 
     def _features_of(self, blob: bytes) -> list[list[float]]:
         """照片里每张脸的特征（已归一化）。没有脸返回空列表。"""
+        return [f for f, _info in self._detect(blob)]
+
+    def _detect(self, blob: bytes) -> list[tuple[list[float], dict]]:
+        """照片里每张脸：(特征, {width 脸宽像素, yaw 侧脸程度})。"""
         import cv2
         import numpy as np
         img = cv2.imdecode(np.frombuffer(blob, np.uint8), cv2.IMREAD_COLOR)
@@ -90,7 +100,10 @@ class FaceIndex:
             for face in (faces if faces is not None else ()):
                 feat = self._rec.feature(self._rec.alignCrop(img, face)).flatten()
                 norm = float(np.linalg.norm(feat)) or 1.0
-                out.append([float(x) / norm for x in feat])
+                rx, ry, lx, ly, nx = (float(v) for v in face[4:9])
+                eye = float(np.hypot(lx - rx, ly - ry)) or 1.0
+                out.append(([float(x) / norm for x in feat],
+                            {"width": float(face[2]), "yaw": (nx - (rx + lx) / 2) / eye}))
         return out
 
     # ---------- 名单 ----------
@@ -118,19 +131,28 @@ class FaceIndex:
         name = name.strip()
         if not name or any(c in name for c in r'\/:*?"<>|') or len(name) > 12:
             return False, "名字不对，这样发：录入人脸 杨桐"
-        feats = self._features_of(blob)
-        if not feats:
+        found = self._detect(blob)
+        if not found:
             return False, "照片里没找到人脸，换一张正脸、光线好一点的"
-        if len(feats) > 1:
-            return False, f"照片里有 {len(feats)} 张脸，请发只有{name}本人一张脸的照片"
+        if len(found) > 1:
+            return False, f"照片里有 {len(found)} 张脸，请发只有{name}本人一张脸的照片"
+        feat, info = found[0]
+        if info["width"] < ENROLL_MIN_WIDTH:
+            return False, "脸太小（离得太远），录入照请靠近一点拍，脸大概占照片宽度的四分之一"
+        if abs(info["yaw"]) > ENROLL_MAX_YAW:
+            return False, "太侧了，录入照要正脸或只侧一点（两只眼睛都看得清），换一张再发"
         person = self._load_person(name)
         if len(person["features"]) >= MAX_PER_PERSON:
             return False, f"{name}已经录了 {MAX_PER_PERSON} 张，够了；要重录先发「删除人脸 {name}」"
-        person["features"].append(feats[0])
+        person["features"].append(feat)
         person["added"].append({"at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "by": by})
         self._save(name, person)
-        log.info("录入人脸：%s（第 %d 张，%s 录入）", name, len(person["features"]), by)
-        return True, f"已录入{name}的人脸（第 {len(person['features'])} 张，只存特征、不存照片）"
+        n = len(person["features"])
+        log.info("录入人脸：%s（第 %d 张，%s 录入）", name, n, by)
+        angle = "正脸" if abs(info["yaw"]) <= 0.2 else "略侧"
+        tip = (f"\n建议每人录 {ENROLL_SUGGEST} 张：1 张正脸 + 左、右各侧一点的各 1 张，还差 {ENROLL_SUGGEST - n} 张"
+               if n < ENROLL_SUGGEST else "")
+        return True, f"已录入{name}的人脸（第 {n} 张，{angle}，只存特征、不存照片）{tip}"
 
     def _save(self, name: str, person: dict) -> None:
         self.store_dir.mkdir(parents=True, exist_ok=True)

@@ -35,14 +35,16 @@ def _near(v: list[float], seed: int, noise: float = 0.25) -> list[float]:
 
 A, B, C = _vec(1), _vec(2), _vec(3)            # 杨桐、郭静、一个客户
 FAKE = {b"yt1": [A], b"yt2": [_near(A, 9)], b"gj": [B], b"none": [], b"two": [A, C],
-        b"crowd": [_near(A, 7), C], b"stranger": [C]}
+        b"crowd": [_near(A, 7), C], b"stranger": [C], b"small": [B], b"side": [B], b"slight": [B]}
+GOOD = {"width": 380, "yaw": 0.1}
+INFO = {b"small": {"width": 70, "yaw": 0.1}, b"side": {"width": 300, "yaw": 1.9}, b"slight": {"width": 300, "yaw": 0.4}}
 IMAGES = {k.decode(): k for k in FAKE}
 
 store = ConfigStore()
 ADMIN = store.backup_settings().admins[0]
 plat = FakePlatform(images=IMAGES)
 p = Pipeline(plat, store)
-p.faces._features_of = lambda blob: FAKE[blob]
+p.faces._detect = lambda blob: [(f, INFO.get(blob, GOOD)) for f in FAKE[blob]]
 p.faces.available = lambda: True
 _n = [0]
 
@@ -68,8 +70,14 @@ def test_enroll_and_identify():
     check("第 2 张" in send(imgs=["yt2"]), "再发照片：录入第 2 张")
     check("没找到人脸" in send("录入人脸 郭静", imgs=["none"]), "没有脸的照片不收")
     check("2 张脸" in send("录入人脸 郭静", imgs=["two"]), "两张脸的照片不收")
+    check("脸太小" in send("录入人脸 郭静", imgs=["small"]), "脸太小（离得远）的录入照不收")
+    check("太侧了" in send("录入人脸 郭静", imgs=["side"]), "侧身太多的录入照不收")
     r = send("录入人脸 郭静", imgs=["gj"])
-    check("已录入郭静" in r, f"录入郭静：{r}")
+    check("已录入郭静" in r and "正脸" in r and "还差 2 张" in r, f"录入郭静：{r}")
+    r = send("录入人脸 郭静", imgs=["slight"])
+    check("第 2 张，略侧" in r and "还差 1 张" in r, f"略侧的收下：{r}")
+    send("删除人脸 郭静")
+    send("录入人脸 郭静", imgs=["gj"])
     eq(send("人脸名单"), "已录入：杨桐（2 张）、郭静（1 张）", "名单")
 
     r = send("认人", imgs=["crowd"])
