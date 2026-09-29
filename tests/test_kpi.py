@@ -186,7 +186,7 @@ def test_template():
 
 
 def test_progress_composite():
-    """功能说明 5.2 的例子：通惠累计（目标是编的）→ 综合 103.35%（加权和，09-29 用户确认）。"""
+    """功能说明 5.2 的例子：通惠累计（目标是编的）→ 综合 103.35%（加权和，暂定）。"""
     target = {"broadband": 20, "high": 15, "giga": 20, "pack": 30, "card": 10}
     done_ = {"broadband": 12, "high": 18.3, "giga": 30, "pack": 25.5, "card": 16}
     p = progress(done_, target)
