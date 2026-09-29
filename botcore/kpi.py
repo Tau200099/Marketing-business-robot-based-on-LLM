@@ -292,6 +292,9 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
 
     subs = _sub_bbs(fee)
     solo = bool(_SOLO_WORD.search(fee)) or (bool(subs) and not _NUMF.search(_SUB_BB_TEXT.sub(" ", money)))
+    if kind == "新增" and not base and not subs and not solo and re.search(_ITEM_WORD, fee, re.I):
+        # 新增纯加装（「10元云盒」「云盒」）：不是新开宽带 —— 只算套包（09-29 用户定）
+        return k
     if kind == "新增" or (solo and kind != "存量"):
         # ---- 新增宽带 ----
         fold = 1.0

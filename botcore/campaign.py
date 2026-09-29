@@ -65,6 +65,9 @@ _LIFT = re.compile(r"提值\s*(\d+)")
 _PART_NUM = re.compile(r"(?<![返])(\d+)")
 # 附加值：「+10」「＋10」「加10」「加装10」都算（09-29：只认字，员工不一定打 +）
 # 线上真实晒单还有用汉字「十」、表情「➕」当加号的（「139十10」「79➕10云盒」），「十」后面跟数字才算
+# 纯加装：开头就是「10元云盒」「云盒10」「云盒」这种，没有宽带档位
+_PURE_ADDON = re.compile(r"^\D{0,3}?(?:\d{1,2}(?:\.\d+)?\s*元?\s*(?:的\s*)?)?(?:云盒|智屏|AI|FTTR|光纤到房间|视联网|看家|守护|摄像头)"
+                         r"(?![^\d]*(?:\d{3}|融合|单宽|包年))", re.I)
 _ADDON = re.compile(r"(?:[+＋➕]|加装|加|十(?=\s*\d))\s*(\d+)")
 # 橙分期：「59返30」「99橙分期返55」—— 价值积分 = 月费 − 月返
 # （培训课件的橙分期表就是这么算的：59返30 → 29 分，399 → 199 分）
@@ -555,6 +558,8 @@ def derive(kind: str, fee: str) -> dict:
     晒单文字的显式字段里取。
     """
     fee = _TECH_TAG.sub("", (fee or "").strip())
+    # 9.9（AI 守护 / 看家）按 10 分算（09-29 用户定）；不换的话整数口径会拆成 9 和 9
+    fee = re.sub(r"(?<![\d.])9\.9(?![\d.])", "10", fee)
     raw_kind = (kind or "").strip()
     kind = normalize_kind(raw_kind)
     nums = [int(x) for x in _NUM.findall(fee)]
@@ -596,6 +601,12 @@ def derive(kind: str, fee: str) -> dict:
     # 新增一条宽带，没有融合档位，不算中高套。
     # 「199+副宽」「99+副宽」是融合套餐带副宽 —— 带「+」的一律不走这里，
     # 由下面的新增分支按主宽 + 副宽数（以前 99/79+副宽 被当成单宽只记 1 条）
+    # 新增纯加装（「10元云盒」「云盒」，没有宽带档位）：不是新开宽带，只记积分（09-29 用户：有这种说法）
+    if kind == "新增" and _PURE_ADDON.search(fee) and not _SUB_BB.search(fee):
+        out["points"] = _part_total(fee)
+        out["pure_addon"] = True
+        return out
+
     if _IS_SOLO.search(fee) and not up and not re.search(r"[+＋➕]|加|十(?=\s*\d)", fee):
         if kind != "存量":
             out["kind"] = "新增"
@@ -613,7 +624,8 @@ def derive(kind: str, fee: str) -> dict:
         out["broadband"] = 1 + len(_SUB_BB.findall(fee))
         if final >= HIGH_TIER_MIN:
             out["high"] = 1
-        out["points"] = final + addon
+        # 积分 = 写出来的钱都加上（档位 + 加装 + 副宽，09-29 用户定：看价值总和）；写了「改」的只算改成那段
+        out["points"] = max(_part_total(fee[up.start(2):] if up else fee), 0)
     elif kind == "单C":
         out["card"] = 1
         out["points"] = final
@@ -659,12 +671,12 @@ def derive(kind: str, fee: str) -> dict:
             out["points"] = addon
             out["points_unknown"] = True
         elif re.search(r"续|平迁", fee) or re.search(r"续|平迁", raw_kind) or base >= 19:
-            # 平续 / 只写了档位的一般续约：长续约记 1，只算附加值
+            # 平续 / 只写了档位的一般续约：长续约记 1，积分 = 总和 − 原档位（加装、副宽都算：「199续约加副宽60」60）
             out["renew"] = 1
-            out["points"] = addon
+            out["points"] = max(_part_total(fee) - base, 0)
         else:
             # 纯加装（「云盒」「+10」），不算长续约，只算附加值
-            out["points"] = addon
+            out["points"] = max(_part_total(fee), addon)
     return out
 
 
