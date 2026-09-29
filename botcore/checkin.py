@@ -940,6 +940,15 @@ def sender_name(userid: str, roster) -> str:
     return next(iter(hits)) if len(hits) == 1 else ""
 
 
+def pinyin_candidates(userid: str, roster) -> set[str]:
+    """账号拼音对上的所有姓名（sender_name 只在唯一时返回，撞车时用这个拿到全部候选）。"""
+    key = re.sub(r"[^a-z]", "", (userid or "").lower())
+    if not key:
+        return set()
+    sender_name(userid, roster)            # 顺带建好 / 刷新拼音索引
+    return set(_py_cache["index"].get(key, set()))
+
+
 # ---------------- 归组 ----------------
 
 def resolve(rec: Checkin, roster) -> tuple[str, str]:

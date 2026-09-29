@@ -578,8 +578,19 @@ class RosterSet:
         return next((h for h in cands if want and h.branch == want), cands[0])
 
     def identify_sender(self, userid: str, prefer_branch: str = "") -> Identity:
-        from .checkin import sender_name
-        return self.identify_name(sender_name(userid, self.all_names()), prefer_branch)
+        from .checkin import pinyin_candidates, sender_name
+        names = self.all_names()
+        name = sender_name(userid, names)
+        if not name and prefer_branch:
+            # 拼音撞车（09-30 用户）：同拼音几个人（张斌 / 张彬、杨晓峰 / 杨晓锋…）时，按水印 / 晒单里写的支局挑，
+            # 恰好一个是这个支局的才认；挑不出来照旧认不出（打卡再看水印成员、晒单再看揽收人）。
+            # 只在撞车时走这里，账号唯一对上 / userid_map 登记过的都不受影响
+            want = branch_stem(prefer_branch)
+            hits = [n for n in sorted(pinyin_candidates(userid, names)) if self.identify_name(n, want).branch == want]
+            if len(hits) == 1:
+                name = hits[0]
+                log.info("账号 %s 拼音撞车，按支局 %s 认成 %s", userid, want, name)
+        return self.identify_name(name, prefer_branch)
 
     def identify_members(self, members: str) -> Identity:
         """打卡第 2 步：水印「小组成员」里出现的活动人员（按出现次数最多的那个组）。"""
