@@ -67,7 +67,7 @@ COLUMNS = [
     ("长续约",            lambda o, i: _num(o.renew),      9),
     ("千兆/500兆",        lambda o, i: _num(o.giga),      11),
     ("单号卡",            lambda o, i: _num(o.card),       9),
-    ("FTTR",             lambda o, i: _num(o.fttr),       8),
+    # FTTR 不单列（09-29 用户：FTTR 在攻坚群总表里算套包，活动群不统计）
     ("云盒/AI视联网/智屏",  lambda o, i: _num(o.box),      17),
     ("价值积分",           lambda o, i: o.points,         10),
     ("揽收人",            lambda o, i: o.collector,       11),

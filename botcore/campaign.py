@@ -1316,6 +1316,11 @@ def build_order(fields: dict, text: str, msg_id: str = "", at: str = "",
     from .kpi import compute as kpi_compute
     k = kpi_compute(o.kind, fee, o.loaded, o.card or 1, o.up_giga, o.up_2000)
     o.giga = k.giga_lines
+    # 新增宽带 / 中高套 / 云盒AI智屏 / 单号卡 也一样：和总表同一套判定，活动群只记个数（09-29 用户定）。
+    # 新增宽带不折算（780 包年记 1）、明星机赠送不算；中高套 239 以上也记 1；云盒/AI/智屏 写了价钱才算、FTTR 不算进这列
+    o.broadband, o.high, o.box = k.bb_lines, (1 if k.high else 0), k.box_items
+    if o.kind == "单C":
+        o.card = int(k.card)
     if any("待核对" in n for n in k.notes):
         o.needs_review = True
         o.note = (o.note + " " + "；".join(n for n in k.notes if "待核对" in n)).strip()

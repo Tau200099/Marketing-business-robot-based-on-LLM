@@ -91,6 +91,8 @@ class KPI:
     card: float = 0.0
     notes: list = field(default_factory=list)
     giga_lines: int = 0      # 千五达标的宽带有几条（不乘 2000M 系数）：活动群的「千兆/500M」按这个数（09-29 用户定）
+    bb_lines: int = 0        # 新增宽带几条（不折算、不 ×1.1）：活动群按这个数
+    box_items: int = 0       # 写了价钱的云盒 / AI / 智屏 几个（FTTR 不算）：活动群「云盒/AI/智屏」按这个数
 
     def as_dict(self) -> dict:
         return {k: round(getattr(self, k), 4) for k in WEIGHTS}
@@ -206,6 +208,36 @@ _SUB_BB_TEXT = re.compile(r"(?:(?<![\d.])\d{2}\s*元?\s*(?:的\s*)?)?副宽\s*(?
 
 # ---------------------------------------------------------------- 套包
 
+_ITEM_NAME = r"(FTTR|光纤到房间|云盒|智屏|AI|视联网|看家|守护|摄像头)"
+_FTTR_NAME = re.compile(r"FTTR|光纤到房间", re.I)
+
+
+def _box_items(text: str, tier: int, loaded: str) -> int:
+    """
+    活动群「云盒/AI/智屏」的个数（09-29 用户定：和总表同一套判定，写了价钱才算；FTTR 不算进这一列）。
+    每笔加装钱算一个套包：紧挨着套包名的按那个名字（「10元云盒」「FTTR25」）；没挨着名字的，
+    勾了 FTTR 且 ≥20 元（FTTR 一般 25）当 FTTR（只认一笔），其余按云盒（没写是哪样默认云盒）。
+    """
+    t = _NOT_PACK.sub(" ", text)
+    ms = list(_NUMF.finditer(t))
+    if tier and ms and float(ms[0].group()) == tier:
+        ms = ms[1:]
+    fttr_flag, fttr_used, n = "FTTR" in (loaded or ""), False, 0
+    for m in ms:
+        a = re.match(rf"\s*元?\s*(?:的\s*)?{_ITEM_NAME}", t[m.end():], re.I)
+        b = re.search(rf"{_ITEM_NAME}\s*(?:加|[+＋➕十])?\s*$", t[:m.start()], re.I)
+        word = (a or b).group(1) if (a or b) else ""
+        if word:
+            is_fttr = bool(_FTTR_NAME.match(word))
+        else:
+            is_fttr = fttr_flag and not fttr_used and float(m.group()) >= 20
+        if is_fttr:
+            fttr_used = True
+        else:
+            n += 1
+    return n
+
+
 def pack_score(money: float, screen: bool = False) -> float:
     """套包分 = 加装钱合计 ÷ 10，有智屏再加 0.3；没写钱就是 0。例：10云盒 + 10智屏 = 2.3，AI 9.9 = 1，199改199+10+25 = 3.5。"""
     if money <= 0:
@@ -242,7 +274,8 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
         if _DIRECT.search(fee):
             k.notes.append("直管不计单号卡")
             return k
-        if (int(up.group(2)) if up else first) >= 19:
+        price = int(up.group(2)) if up else first
+        if price >= 19 or not nums:        # 没写月费（「山城卡」）判不了价钱，照算
             k.card = float(cards or 1)
         return k
 
@@ -255,6 +288,7 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
     after_text = money[up.start(2):] if up else money
     screen = "智屏" in (loaded or "") or bool(_SCREEN.search(fee))
     k.pack = pack_score(_addon_money(after_text, after_base), screen)
+    k.box_items = _box_items(after_text, after_base, loaded) if k.pack else 0
 
     subs = _sub_bbs(fee)
     solo = bool(_SOLO_WORD.search(fee)) or (bool(subs) and not _NUMF.search(_SUB_BB_TEXT.sub(" ", money)))
@@ -268,13 +302,16 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
         if solo:
             if subs:                               # 单办副宽
                 k.broadband = fold * len(subs)
+                k.bb_lines = len(subs)
                 k.giga = float(sum(subs))
             else:                                  # 单宽 / 包年：138/198/1390/1990 是 500M 以上
                 k.broadband = fold
+                k.bb_lines = 1
                 k.giga = 1.0 if base in SOLO_GIGA_TIERS else 0.0
             k.giga_lines = int(k.giga)
             return k
         k.broadband = fold * (1 + len(subs))
+        k.bb_lines = 1 + len(subs)
         # ---- 中高套（只算新增融合）----
         # 新增写了「改」（「109改139」异网策反之类）：按改成的档位算
         if after_base >= HIGH_13:
@@ -290,6 +327,7 @@ def compute(kind: str, fee: str, loaded: str = "", cards: int = 1, up_giga: str 
         # 存量带副宽（09-29 用户定）：副宽是新开的一条宽带 —— 算新增宽带，60 元（500M）另记千五；
         # 副宽的钱不算进主宽带的迁转 / 提值（下面只看去掉副宽后的「主宽带」那段）
         k.broadband = float(len(subs))
+        k.bb_lines = len(subs)
         sub_giga = float(sum(subs))
         main = _SUB_BB_TEXT.sub(" ", money) if subs else money
         up = _tier_up(main)
