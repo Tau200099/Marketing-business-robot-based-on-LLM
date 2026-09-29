@@ -60,9 +60,9 @@ def send(text="", chat="p2p", sender=ADMIN, files=None) -> str:
     return plat.replies[-1] if len(plat.replies) > before else ""
 
 
-def order(no: str, branch="") -> str:
+def order(no: str, branch="", collector="") -> str:
     return (f"支局：{branch or '新盛支局'}\n业务类型:新增\n办理套餐：199\n业务号码:{no}\n价值积分:199\n"
-            "是否加载云盒：是\n揽收人:\n")
+            f"是否加载云盒：是\n揽收人:{collector}\n")
 
 
 def test_multi_on():
@@ -136,9 +136,25 @@ def test_collector_fallback():
     check("按揽收人归组" in o.note, "备注说明按揽收人归")
 
 
+def test_branch_by_collector():
+    """09-29 用户定：总表支局按揽收人；揽收人没写 / 查不到按晒单写的支局。换名册重新归组也不丢。"""
+    camp = p.campaign()
+    before = len(camp.orders)
+    send(order("13900000011", "新盛支局", "城非活动"), chat="g_city", sender="u_city")   # 揽收人是古南的
+    send(order("13900000012", "东溪支局", "农丙"), chat="g_hq", sender="u_rural")         # 揽收人是三江的
+    send(order("13900000013", "东溪支局", "路人乙"), chat="g_hq", sender="u_rural")       # 揽收人查不到
+    got = camp.orders[before:]
+    eq([o.branch for o in got], ["古南", "三江", "东溪"], "总表支局 = 揽收人的支局；查不到按晒单写的")
+    eq([o.written_branch for o in got], ["新盛", "东溪", "东溪"], "晒单写的支局原样留着")
+    eq((got[0].region, got[0].role), ("城区", "活动"), "活动群归属仍按晒单人")
+    camp.reassign()
+    eq([o.branch for o in got], ["古南", "三江", "东溪"], "换名册重新归组后不变")
+
+
 run(test_multi_on)
 run(test_import)
 run(test_identify)
 run(test_orders)
+run(test_branch_by_collector)
 run(test_collector_fallback)
 done()

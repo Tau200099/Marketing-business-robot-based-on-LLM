@@ -235,7 +235,8 @@ class Order:
     # ---- 多群（09-29 国庆版）：按人分类，一单只记一次，各张表按这几个字段取 ----
     region: str = ""             # 城区 / 农村 / ""（未识别）
     role: str = ""               # 活动 / 非活动 / 未识别（单群模式为空）
-    branch: str = ""             # 落地支局（简称）：晒单里写的「支局」，没写按人查；攻坚群总表按它算
+    branch: str = ""             # 总表归哪个支局（简称）：揽收人的支局（09-29 用户定），查不到按晒单写的支局，再按晒单人
+    written_branch: str = ""     # 晒单里写的「支局」（简称），原样留着
     community: bool = False      # 发单人是小区 / 场镇营销人员：总表里新增宽带、中高套 ×1.1
     points: int = 0              # 价值积分
 
@@ -1050,10 +1051,12 @@ class Campaign:
         """
         from .regions import ACTIVITY, UNKNOWN, branch_stem
         rs = self.rosters
-        if not order.branch:
-            # 第一次归组时 team 还是晒单里写的「支局」（build_order 放进来的），先存下来
-            order.branch = branch_stem(order.team)
+        if not order.written_branch:
+            # 第一次归组时 team 还是晒单里写的「支局」（build_order 放进来的），先存下来；
+            # 老记录没有这个字段，branch 里存的就是当时写的支局
+            order.written_branch = order.branch or branch_stem(order.team)
         ident = rs.identify_sender(order.sender_id) if order.sender_id else None
+        poster_branch = ident.branch if ident is not None and ident.role != UNKNOWN else ""
         order.poster = ident.name if ident and ident.role != UNKNOWN else ""
         if (ident is None or ident.role == UNKNOWN) and order.collector:
             by_collector = rs.identify_name(order.collector)
@@ -1067,12 +1070,18 @@ class Campaign:
                 order.group, order.team = ident.group, ident.team
             else:
                 order.group, order.team = "", ident.branch
-            if not order.branch:
-                order.branch = ident.branch
+        # 总表归哪个支局（09-29 用户定）：按揽收人查名册 → 他的支局；揽收人没写 / 查不到 → 晒单里写的支局 → 晒单人的支局
+        #（用户确认过不会出现揽收人是别的支局的人）
+        by_collector = rs.identify_name(order.collector) if order.collector else None
+        if by_collector is not None and by_collector.role != UNKNOWN and by_collector.branch:
+            order.branch = by_collector.branch
         else:
+            order.branch = order.written_branch or poster_branch or (ident.branch if ident is not None else "")
+        if ident is None or ident.role == UNKNOWN:
             order.region, order.role, order.community = "", UNKNOWN, False
             order.needs_review = True
-            order.note = (order.note + " 晒单人和揽收人都不在名册").strip()
+            if "都不在名册" not in order.note:
+                order.note = (order.note + " 晒单人和揽收人都不在名册").strip()
             order.team = order.branch
 
     def _place(self, order: "Order") -> None:
