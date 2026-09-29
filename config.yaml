@@ -724,8 +724,24 @@ guoqing:
     一类: [通惠, 古南, 文龙, 万盛, 东林]
     二类: [打通, 赶水, 东溪, 青年, 新盛, 郭扶]
     三类: [三江, 南桐, 安稳, 永新, 隆盛, 三角]
-  targets: {}
-  #   通惠: {broadband: 20, high: 15, giga: 20, pack: 30, card: 10}
+  targets:                # 附件一 7 天目标（09-30 用户给）；当日目标没配 = 7 天目标 ÷ 7（就是附件一的日均目标）
+    通惠: {broadband: 39, high: 15, giga: 33, pack: 48, card: 32}
+    古南: {broadband: 36, high: 14, giga: 28, pack: 46, card: 32}
+    文龙: {broadband: 36, high: 14, giga: 28, pack: 47, card: 35}
+    万盛: {broadband: 32, high: 12, giga: 23, pack: 41, card: 23}
+    东林: {broadband: 32, high: 11, giga: 22, pack: 39, card: 33}
+    打通: {broadband: 22, high: 8, giga: 16, pack: 36, card: 24}
+    赶水: {broadband: 19, high: 7, giga: 14, pack: 34, card: 24}
+    东溪: {broadband: 19, high: 7, giga: 14, pack: 34, card: 22}
+    青年: {broadband: 19, high: 7, giga: 13, pack: 34, card: 20}
+    新盛: {broadband: 20, high: 7, giga: 15, pack: 31, card: 17}
+    郭扶: {broadband: 18, high: 6, giga: 12, pack: 31, card: 16}
+    三江: {broadband: 18, high: 6, giga: 12, pack: 28, card: 16}
+    南桐: {broadband: 18, high: 6, giga: 11, pack: 25, card: 20}
+    安稳: {broadband: 16, high: 5, giga: 10, pack: 22, card: 12}
+    永新: {broadband: 14, high: 5, giga: 9, pack: 23, card: 11}
+    隆盛: {broadband: 13, high: 5, giga: 8, pack: 21, card: 12}
+    三角: {broadband: 13, high: 5, giga: 7, pack: 20, card: 16}
   daily_targets: {}
   pk:
     一类: [2000, 1500, 0, -1500, -2000]
