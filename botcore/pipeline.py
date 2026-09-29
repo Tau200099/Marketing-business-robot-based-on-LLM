@@ -1468,8 +1468,13 @@ class Pipeline:
         cfg = self.store.tally_settings()
         if not cfg.enabled or not result["is_new"] or not self._counts(msg):
             return
-        if regions.multi_enabled(self.store) and regions.group_role(self.store, msg.chat_id) == "hq":
-            return              # 战报只在活动群播，攻坚群里的单只点赞（09-29 用户定）
+        if regions.multi_enabled(self.store):
+            role = regions.group_role(self.store, msg.chat_id)
+            if role == "hq":
+                return          # 战报只在活动群播，攻坚群里的单只点赞（09-29 用户定）
+            order = self.campaign().find(msg.msg_id) if role in regions.REGION_OF_ROLE else None
+            if order is not None and not self._counts_for_tally(msg, order, regions.REGION_OF_ROLE[role]):
+                return
 
         if not branch:
             # 支局没识别出来就不播 —— 播一个没有支局名的战报没意义，
@@ -1521,6 +1526,20 @@ class Pipeline:
         # （对个人的点赞和判重警告仍然带 @，那两条确实是冲着发单人去的。）
         self.platform.reply(msg, text, None)
         self.sendlog.record(text, "战报", msg.chat_id, dedupe=True)
+
+    def _counts_for_tally(self, msg: InboundMessage, order, region: str) -> bool:
+        """
+        活动群的战报只数【本群的活动人员】的单，和这个群的业绩通报一个口径（09-29 用户定）。
+        非活动人员：@他提醒一句去攻坚群晒（这单照常点赞、照常进总表）；认不出的人管理员那边已经提醒了，这里不回。
+        """
+        if order.role == regions.ACTIVITY and order.region == region:
+            return True
+        if order.role == regions.OTHER:
+            hq = next((g.name for g in self.store.groups() if g.role == "hq"), "") or "攻坚群"
+            self.platform.reply(msg, f"您不是本次活动人员，此单已计入总表，后续请到「{hq}」晒单",
+                                msg.sender_id or None)
+        log.info("战报不计：晒单人是%s（%s），不是本群的活动人员", order.role or "未识别", order.region or "区域未知")
+        return False
 
     # ---------- 发送 ----------
 

@@ -34,8 +34,10 @@ CITY_A = next(iter(city))
 (tmp / "roster_rural.json").write_text(json.dumps({"teams": ["赶水战队"], "people": {
     "农甲": {"group": "农甲、农乙", "team": "赶水战队"}, "农乙": {"group": "农甲、农乙", "team": "赶水战队"}}},
     ensure_ascii=False), encoding="utf-8")
-(tmp / "userid_map.json").write_text(json.dumps({"u_city": CITY_A, "u_rural": "农甲"}, ensure_ascii=False),
-                                     encoding="utf-8")
+(tmp / "userid_map.json").write_text(json.dumps({"u_city": CITY_A, "u_rural": "农甲", "u_other": "城非活动"},
+                                                ensure_ascii=False), encoding="utf-8")
+(tmp / "branch_city.json").write_text(json.dumps({"people": {"城非活动": {"branch": "东林", "community": False}}},
+                                                 ensure_ascii=False), encoding="utf-8")
 
 plat = FakePlatform()
 p = Pipeline(plat, store)
@@ -129,7 +131,28 @@ def test_stickers_and_broadcast():
     check(len(plat.replies) == before + 1 and "新盛" in plat.replies[-1], "活动群照常播战报")
 
 
+def test_broadcast_only_activity():
+    """09-29：活动群战报只数本群活动人员；非活动人员照常点赞、进总表，提醒去攻坚群晒单。"""
+    before = len(plat.replies)
+    post(order("13977770001"), CITY, "u_other")
+    got = plat.replies[before:]
+    check(any("点赞" in x for x in got), f"非活动人员：照常点赞 {got}")
+    check(any("不是本次活动人员" in x and "已计入总表" in x and "攻坚群" in x for x in got), f"提醒去攻坚群晒单 {got}")
+    check(not any("恭喜" in x for x in got), f"不播战报 {got}")
+    o = p.campaign().orders[-1]
+    eq((o.role, o.branch), ("非活动", "新盛"), "这单照样进台账（总表按晒单写的支局）")
+    before = len(plat.replies)
+    post(order("13977770002"), CITY, "u_city")
+    got = plat.replies[before:]
+    check(any("恭喜" in x for x in got) and not any("不是本次活动人员" in x for x in got), f"活动人员：照常播战报 {got}")
+    before = len(plat.replies)
+    post(order("13977770003"), CITY, "u_rural")
+    got = plat.replies[before:]
+    check(not any("恭喜" in x for x in got), f"农村活动人员在城区群晒单：城区群不播战报 {got}")
+
+
 run(test_bulletins_per_region)
+run(test_broadcast_only_activity)
 run(test_commands_and_follow)
 run(test_checkin_bulletins)
 run(test_stickers_and_broadcast)
