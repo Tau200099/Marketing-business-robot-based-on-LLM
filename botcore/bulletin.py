@@ -295,6 +295,9 @@ class Bulletin:
         self._fixed_inflight: set[str] = set()   # 正在发的定点通报
         # 攻坚群：发支局总表 + 支局长打卡点检表（第 5、6 块装上）。签名 (chats, reason) -> {"ok": [...], "failed": [...]}
         self.hq_publish = None
+        # 支局长点检表单独的时刻（和通报定点不重合的，如 21:30）：hq_chiefs(chats, reason)，hq_chief_times() -> ["21:30", …]
+        self.hq_chiefs = None
+        self.hq_chief_times = None
         self._state = self._load()
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -344,8 +347,13 @@ class Bulletin:
         ready = getattr(self.platform, "is_ready", None)
         if ready is not None and not ready():
             return              # 断线时不发、不记「已发」（09-24 断线那晚 21:00 通报就是这么丢的）
-        for hhmm in cfg.fixed_times or ():
-            if self._state.fixed_sent.get(hhmm) == today or hhmm in self._fixed_inflight:
+        slots = [(str(h), str(h), "all") for h in (cfg.fixed_times or ())]
+        if self.hq_chiefs is not None and self.hq_chief_times is not None:
+            fixed = {str(h) for h in (cfg.fixed_times or ())}
+            # 点检表时刻里和通报定点重合的（11:50 / 18:00）跟着总表一起发；不重合的（21:30）在这里单独发
+            slots += [(h, f"点检{h}", "chiefs") for h in self.hq_chief_times() if h not in fixed]
+        for hhmm, key, kind in slots:
+            if self._state.fixed_sent.get(key) == today or key in self._fixed_inflight:
                 continue
             try:
                 h, m = str(hhmm).split(":")
@@ -355,6 +363,30 @@ class Bulletin:
                 continue
             # 到点后 10 分钟内都算数：进程刚好那一分钟没跑也能补上
             if not (due <= now <= due + timedelta(minutes=10)):
+                continue
+            if kind == "chiefs":
+                from . import regions
+                hq = tuple(regions.role_chats(self.store, "hq"))
+                if not hq:
+                    continue
+                log.info("定点支局长点检表 %s", hhmm)
+                self._fixed_inflight.add(key)
+
+                def chiefs_done(fut, key=key, hhmm=hhmm):
+                    self._fixed_inflight.discard(key)
+                    try:
+                        ok = bool(fut.result().get("ok"))
+                    except Exception:
+                        ok = False
+                    if ok:
+                        self._state.fixed_sent[key] = today
+                        self._save()
+                    else:
+                        log.warning("定点支局长点检表 %s 没发出去，稍后重试", hhmm)
+                try:
+                    self._pool.submit(self.hq_chiefs, hq, f"定点{hhmm}").add_done_callback(chiefs_done)
+                except RuntimeError:
+                    self._fixed_inflight.discard(key)
                 continue
             chats = self._target_chats()
             if not chats:

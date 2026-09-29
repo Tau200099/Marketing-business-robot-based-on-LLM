@@ -163,6 +163,25 @@ def test_publish():
     eq(r["ok"], ["g_hq"], "攻坚群发成功")
     check(plat.sent_texts and plat.sent_texts[0][0] == "g_hq", "发了文字说明（再发表格图）")
 
+    class Board:
+        sent = []
+
+        def send(self, platform, chat, now):
+            self.sent.append(chat)
+            return True
+
+    board = Board()
+    hq = HqPublisher(FakePlatform(), store, lambda: Camp(), board)
+    hq.publish(("g_hq",), "定点10:30", NOW)
+    eq(board.sent, [], "10:30 定点只发总表，不发支局长点检表（09-30）")
+    hq.publish(("g_hq",), "定点11:50", NOW)
+    eq(board.sent, ["g_hq"], "11:50 定点总表 + 点检表")
+    hq.publish(("g_hq",), "通报", NOW)
+    eq(board.sent, ["g_hq"], "群里喊「通报」只发总表（点检表喊「打卡通报」）")
+    r = hq.publish_chiefs_only(("g_hq",), "定点21:30", NOW)
+    eq((r["ok"], board.sent), (["g_hq"], ["g_hq", "g_hq"]), "21:30 只发点检表")
+    eq(hq.chief_times(), ["11:50", "18:00", "21:30"], "默认时刻 11:50 / 18:00 / 21:30")
+
 
 run(test_sum_and_progress)
 run(test_rank_and_pk)

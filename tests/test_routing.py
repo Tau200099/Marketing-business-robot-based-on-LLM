@@ -45,6 +45,9 @@ pool = ThreadPoolExecutor(2)
 bul = Bulletin(plat, store, p.campaign, pool)
 hq_calls = []
 bul.hq_publish = lambda chats, reason: (hq_calls.append((chats, reason)) or {"ok": list(chats), "failed": []})
+chief_calls = []
+bul.hq_chiefs = lambda chats, reason: (chief_calls.append((chats, reason)) or {"ok": list(chats), "failed": []})
+bul.hq_chief_times = lambda: ["11:50", "18:00", "21:30"]
 ckb = CheckinBulletin(plat, store, p.campaign, pool)
 ck_hq = []
 ckb.hq_command = lambda chat: ck_hq.append(chat)
@@ -155,5 +158,29 @@ run(test_bulletins_per_region)
 run(test_broadcast_only_activity)
 run(test_commands_and_follow)
 run(test_checkin_bulletins)
+
+
+def test_chief_times():
+    """09-30 用户：支局长点检表只在 11:50 / 18:00 / 21:30 发；21:30 不是通报定点，单独发一次、只发点检表。"""
+    import time as _t
+    cfg = store.bulletin_settings()
+    assert "21:30" not in cfg.fixed_times
+    hq_calls.clear()
+    chief_calls.clear()
+    bul._check_fixed(cfg, datetime(2026, 10, 1, 21, 31))
+    for _ in range(50):
+        if chief_calls:
+            break
+        _t.sleep(0.1)
+    eq([r for _c, r in chief_calls], ["定点21:30"], "21:31：发一次点检表")
+    eq(hq_calls, [], "21:31：不发总表 / 活动通报")
+    bul._check_fixed(cfg, datetime(2026, 10, 1, 21, 35))
+    _t.sleep(0.3)
+    eq(len(chief_calls), 1, "同一天不重复发")
+    bul._check_fixed(cfg, datetime(2026, 10, 1, 21, 45))
+    _t.sleep(0.3)
+    eq(len(chief_calls), 1, "过了 10 分钟窗口不补发")
+
 run(test_stickers_and_broadcast)
+run(test_chief_times)
 done()

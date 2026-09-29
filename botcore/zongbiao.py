@@ -39,6 +39,9 @@ class GuoqingSettings:
     })
     targets: dict = field(default_factory=dict)          # 支局 -> {broadband, high, giga, pack, card}（累计）
     daily_targets: dict = field(default_factory=dict)    # 支局 -> 同上；没配 = 累计 ÷ 活动天数
+    # 支局长打卡点检表发哪几个时刻（09-30 用户：11:50 / 18:00 / 21:30，发当天 7:30 到那时的累计）。
+    # 和通报定点重合的跟着总表一起发，不重合的（21:30）单独发；群里喊「打卡通报」随时发
+    chief_times: list = field(default_factory=lambda: ["11:50", "18:00", "21:30"])
     pk: dict = field(default_factory=lambda: {
         "一类": [2000, 1500, 0, -1500, -2000],
         "二类": [1500, 1200, 1000, -1000, -1200, -1500],
