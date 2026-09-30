@@ -168,6 +168,7 @@ class CheckinBulletin:
         self._lock = threading.Lock()
         self._last_command = 0.0
         self._inflight: set[str] = set()          # 正在发的定点，别在它发完之前又提交一次
+        self.hq_command = None                    # 攻坚群喊「打卡通报」时调它（发支局长点检表），bot.py 装上
         self.recorder = None                      # CheckinRecorder，bot.py 装上：发通报前先补判
         self._stop = threading.Event()
 
@@ -206,8 +207,8 @@ class CheckinBulletin:
             # 到点后 10 分钟内都算：进程刚好那一分钟没跑也能补上，但不会把上午的拖到下午发
             if not (due <= now <= due + timedelta(minutes=10)):
                 continue
-            chats = tuple(getattr(getattr(self.platform, "cfg", None), "chat_ids", ()) or ())
-            if not chats:
+            targets = self._targets()
+            if not targets:
                 continue
             log.info("打卡通报定点 %s", hhmm)
             self._inflight.add(hhmm)
@@ -225,7 +226,7 @@ class CheckinBulletin:
                 else:
                     log.warning("打卡通报 %s 没发出去，稍后重试", hhmm)
             try:
-                self._pool.submit(self.publish, chats, f"定点{hhmm}", due).add_done_callback(done)
+                self._pool.submit(self.publish_targets, targets, f"定点{hhmm}", due).add_done_callback(done)
             except RuntimeError:
                 self._inflight.discard(hhmm)
 
@@ -241,8 +242,22 @@ class CheckinBulletin:
                 log.info("「%s」一分钟内喊过了，忽略", text)
                 return True
             self._last_command = time.time()
-        log.info("群里喊「%s」，立即打卡通报", text)
-        self._submit((msg.chat_id,), f"命令「{text}」", datetime.now())
+        from . import regions
+        region = None
+        if regions.multi_enabled(self.store):
+            role = regions.group_role(self.store, msg.chat_id)
+            if role == "hq":
+                # 攻坚群没有活动打卡通报：喊「打卡通报」发支局长打卡点检表（第 6 块装上）
+                if self.hq_command is not None:
+                    log.info("攻坚群喊「%s」，发支局长打卡点检表", text)
+                    self.hq_command(msg.chat_id)
+                return True
+            region = regions.REGION_OF_ROLE.get(role)
+        log.info("群里喊「%s」，立即打卡通报%s", text, f"（{region}）" if region else "")
+        try:
+            self._pool.submit(self.publish, (msg.chat_id,), f"命令「{text}」", datetime.now(), region)
+        except RuntimeError:
+            pass
         return True
 
     # ---------- 发送 ----------
@@ -253,14 +268,39 @@ class CheckinBulletin:
         except RuntimeError:
             pass
 
-    def build(self, now: datetime) -> tuple[str, bytes, str]:
+    def _targets(self) -> list[tuple[tuple, str | None]]:
+        """[(群, 区域)]：多群模式城区群发城区、农村群发农村（攻坚群没有打卡通报，它有支局长点检表）；单群照旧。"""
+        from . import regions
+        if regions.multi_enabled(self.store):
+            out = []
+            for role, region in regions.REGION_OF_ROLE.items():
+                chats = regions.role_chats(self.store, role)
+                if chats:
+                    out.append((chats, region))
+            return out
+        chats = tuple(getattr(getattr(self.platform, "cfg", None), "chat_ids", ()) or ())
+        return [(chats, None)] if chats else []
+
+    def build(self, now: datetime, region: str | None = None) -> tuple[str, bytes, str]:
+        from .checkin import of_region
         s = self.store.checkin_settings()
         camp = self._campaign()
         camp.refresh_roster()
-        records = load_records(DATA / s.store_file)
-        return build_report(records, camp.roster, s, self.store.campaign_settings().title, now)
+        roster = (camp.rosters.on(now.strftime("%Y-%m-%d")).activity[region]      # 那天的活动名单（09-29）
+                  if (region and getattr(camp, "rosters", None)) else camp.roster)
+        records = of_region(load_records(DATA / s.store_file), region)
+        return build_report(records, roster, s, self.store.campaign_settings().title, now)
 
-    def publish(self, chats, reason: str, now: datetime) -> dict:
+    def publish_targets(self, targets, reason: str, now: datetime) -> dict:
+        """定点：每个 (群, 区域) 发各自那份；有一个群发成功就算这个时刻发过（失败的记日志）。"""
+        total = {"ok": [], "failed": []}
+        for chats, region in targets:
+            r = self.publish(chats, reason, now, region)
+            total["ok"] += r.get("ok", [])
+            total["failed"] += r.get("failed", [])
+        return total
+
+    def publish(self, chats, reason: str, now: datetime, region: str | None = None) -> dict:
         result = {"ok": [], "failed": []}
         if self.recorder is not None:
             try:                    # 发之前把「待判定」补判一遍，表里尽量不留待判定（09-28）
@@ -268,7 +308,7 @@ class CheckinBulletin:
             except Exception:
                 log.exception("通报前补判出错（照常发）")
         try:
-            text, png, title = self.build(now)
+            text, png, title = self.build(now, region)
         except Exception:
             log.exception("生成打卡通报失败（%s）", reason)
             return result

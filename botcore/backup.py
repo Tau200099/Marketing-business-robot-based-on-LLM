@@ -38,6 +38,9 @@ HISTORY_DIR = DATA / "history"
 class BackupSettings:
     # 能单聊取备份的人（企微账号 ID）。台账是全员业绩明细，不能谁私聊都给
     admins: list = field(default_factory=list)
+    # 单聊提醒发给谁（认不出的人晒单、视觉模型额度用完 / 换模型）。和 admins 分开：
+    # 管理员以后会多，提醒只发这里列的人（09-29 用户：只发黄涛）。没配才退回发给 admins
+    notify: list = field(default_factory=list)
     keep_days: int = 14          # 每日快照留几天
     # 写之前留底固定每个文件留最近 20 版（keep_version 的默认值）
 

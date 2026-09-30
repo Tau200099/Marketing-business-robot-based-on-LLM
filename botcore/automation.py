@@ -281,7 +281,10 @@ class StickerAutomation:
     # ---------- 发送 ----------
 
     def _target_chats(self) -> tuple[str, ...]:
-        """定时任务没有「触发它的那条消息」，所以群要显式配。"""
+        """定时任务没有「触发它的那条消息」，所以群要显式配。多群模式只发两个活动群（09-29 用户定）。"""
+        from . import regions
+        if regions.multi_enabled(self.store):
+            return regions.role_chats(self.store, "city") + regions.role_chats(self.store, "rural")
         return tuple(getattr(getattr(self.platform, "cfg", None), "chat_ids", ()) or ())
 
     def _send(self, category: str, count: int) -> int:

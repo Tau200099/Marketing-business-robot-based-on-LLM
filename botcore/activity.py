@@ -69,14 +69,24 @@ class Activity:
 
 
 _lock = threading.Lock()
-_cache: tuple[float, Activity | None] = (-1.0, None)
+_cache: tuple[tuple, Activity | None] = ((), None)
+
+
+def _stamp() -> tuple:
+    """
+    文件的「版本」：修改时间（纳秒）+ 大小 + inode。
+    只看 mtime 不够：同一个时钟刻度里连着改两次（两条「新活动」挨着发），mtime 一样，缓存不换，
+    还在用旧活动（09-29 测试 1/6 概率踩到）。_save 是写临时文件再替换，每次 inode 都变，加上它就稳了。
+    """
+    st = PATH.stat()
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
 
 
 def load() -> Activity | None:
-    """当前活动；没有 activity.json 返回 None。按 mtime 缓存，改了文件马上生效。"""
+    """当前活动；没有 activity.json 返回 None。按文件版本缓存，改了文件马上生效。"""
     global _cache
     try:
-        mtime = PATH.stat().st_mtime
+        mtime = _stamp()
     except OSError:
         return None
     with _lock:
@@ -93,11 +103,12 @@ def load() -> Activity | None:
         return act
 
 
-def mtime() -> float:
+def mtime() -> tuple:
+    """活动文件的版本（配置覆盖层拿它当缓存键）。没有文件返回空元组。"""
     try:
-        return PATH.stat().st_mtime
+        return _stamp()
     except OSError:
-        return 0.0
+        return ()
 
 
 def managed() -> bool:
@@ -127,6 +138,9 @@ def _save(act: Activity) -> None:
     tmp.write_text(json.dumps(asdict(act), ensure_ascii=False, indent=2), encoding="utf-8")
     keep_version(PATH)
     tmp.replace(PATH)
+    global _cache
+    with _lock:
+        _cache = ((), None)          # 刚写过：下次 load 一定重读
 
 
 # ---------------- 解析「新活动 秋促专项营销活动 10.1-10.4」 ----------------

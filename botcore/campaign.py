@@ -36,7 +36,7 @@ import json
 import logging
 import re
 import threading
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -63,7 +63,12 @@ _UPGRADE = re.compile(r"(\d+)\s*(?:改|升档|升|提值|→|->)\s*(\d+)")
 _LIFT = re.compile(r"提值\s*(\d+)")
 # 存量单看【总和】：前后各自「档位 + 附加 − 返费」
 _PART_NUM = re.compile(r"(?<![返])(\d+)")
-_ADDON = re.compile(r"\+\s*(\d+)")
+# 附加值：「+10」「＋10」「加10」「加装10」都算（09-29：只认字，员工不一定打 +）
+# 线上真实晒单还有用汉字「十」、表情「➕」当加号的（「139十10」「79➕10云盒」），「十」后面跟数字才算
+# 纯加装：开头就是「10元云盒」「云盒10」「云盒」这种，没有宽带档位
+_PURE_ADDON = re.compile(r"^\D{0,3}?(?:\d{1,2}(?:\.\d+)?\s*元?\s*(?:的\s*)?)?(?:云盒|智屏|AI|FTTR|光纤到房间|视联网|看家|守护|摄像头)"
+                         r"(?![^\d]*(?:\d{3}|融合|单宽|包年))", re.I)
+_ADDON = re.compile(r"(?:[+＋➕]|加装|加|十(?=\s*\d))\s*(\d+)")
 # 橙分期：「59返30」「99橙分期返55」—— 价值积分 = 月费 − 月返
 # （培训课件的橙分期表就是这么算的：59返30 → 29 分，399 → 199 分）
 _REBATE = re.compile(r"返\s*(\d+)")
@@ -78,6 +83,15 @@ _SUB_BB = re.compile(r"副宽")
 _IS_SOLO = re.compile(r"单宽|副宽|包年|包月")
 # 权益金币数，不是档位也不是积分（699 / 1200 / 1298 …）。见到就不当数字用
 _IS_EQUITY = re.compile(r"权益|金币")
+# 包年宽带的积分按年费 ÷ 10（09-30 用户：新增 780 包年记 78、1390 包年记 139）
+_YEARLY_FEE = re.compile(r"(?<![\d.])(\d{3,4})(\s*元?\s*包年)")
+# 权益金币数（「699权益金」「权益金699」）：不是钱。档位数字（「239权益兑换FTTR」的 239）不在此列
+_EQUITY_AMOUNT = re.compile(r"(?:权益金?|金币)\s*(\d+)|(\d+)\s*(?:元|个)?\s*(?:权益|金币)")
+FUSION_TIERS = {79, 99, 129, 139, 169, 199, 239, 299, 399}
+
+
+def _drop_equity_amount(m: re.Match) -> str:
+    return m.group(0) if int(m.group(1) or m.group(2)) in FUSION_TIERS else " "
 # 号卡类：山城卡、号卡、单C 卡等。命中就不算宽带。
 # 号卡类：山城卡、号卡、携转异网卡、副卡、单C 等。命中就不算宽带。
 # 「携转」= 携号转网，把别家的号转过来，属于新增卡（实测漏判过）。
@@ -140,15 +154,23 @@ class CampaignSettings:
     start: str = ""            # YYYY-MM-DD，仅 fixed 时用
     end: str = ""              # YYYY-MM-DD，仅 fixed 时用
     targets: Targets = field(default_factory=Targets)
+    # 农村活动群的目标（09-29 用户：城区农村目标不一样）；没配就用 targets
+    targets_rural: "Targets | None" = None
+
+    def targets_for(self, region: str = "") -> Targets:
+        return self.targets_rural if (region == "农村" and self.targets_rural is not None) else self.targets
 
     @classmethod
     def from_dict(cls, raw: dict | None) -> "CampaignSettings":
         raw = dict(raw or {})
         t = raw.pop("targets", None) or {}
         targets = Targets(**{k: v for k, v in t.items() if k in Targets.__dataclass_fields__})
+        tr = raw.pop("targets_rural", None)
+        targets_rural = (Targets(**{k: v for k, v in tr.items() if k in Targets.__dataclass_fields__})
+                         if isinstance(tr, dict) else None)
         known = {k: str(v).strip() if v is not None else "" for k, v in raw.items()
                  if k in ("title", "rank_period", "ledger_period", "start", "end")}
-        cfg = cls(targets=targets, **known)
+        cfg = cls(targets=targets, targets_rural=targets_rural, **known)
         # start / end 写成 2026/09/11、2026.9.11、9.11 都认；认不出就当没填
         for name in ("start", "end"):
             raw_v = getattr(cfg, name)
@@ -219,6 +241,15 @@ class Order:
     card: int = 0                # 单号卡
     fttr: int = 0                # FTTR
     box: int = 0                 # 云盒/AI视联网/智屏
+    loaded: str = ""             # 晒单「是否加载」里勾了哪几样：云盒,AI,智屏,FTTR（国庆版套包分要分清智屏）
+    up_giga: str = ""            # 模板「是否升级千兆/500M」：是 / 否；旧模板没这栏为空（国庆版千五看它）
+    up_2000: str = ""            # 模板「是否升级2000M」：是 / 否；旧模板没这栏为空
+    # ---- 多群（09-29 国庆版）：按人分类，一单只记一次，各张表按这几个字段取 ----
+    region: str = ""             # 城区 / 农村 / ""（未识别）
+    role: str = ""               # 活动 / 非活动 / 未识别（单群模式为空）
+    branch: str = ""             # 总表归哪个支局（简称）：揽收人的支局（09-29 用户定），查不到按晒单写的支局，再按晒单人
+    written_branch: str = ""     # 晒单里写的「支局」（简称），原样留着
+    community: bool = False      # 发单人是小区 / 场镇营销人员：总表里新增宽带、中高套 ×1.1
     points: int = 0              # 价值积分
 
     source: str = ""             # 文字晒单 / 图片晒单
@@ -330,6 +361,19 @@ class Roster:
         except Exception as exc:
             log.error("名册读不了：%s", exc)
             return
+        self._load(raw)
+
+    @classmethod
+    def from_dict(cls, raw: dict, label: str = "") -> "Roster":
+        """从字典建名册（国庆每天一份的名单，见 regions.DailyRosters）。不对应文件，不热加载。"""
+        r = cls.__new__(cls)
+        r.path = Path(label or "roster_days")
+        r.teams, r.people, r._aliases = [], {}, {}
+        r._mtime = None
+        r._load(raw, quiet=True)
+        return r
+
+    def _load(self, raw: dict, quiet: bool = False) -> None:
         self.teams = list(raw.get("teams") or [])
         self.people = _names_as_groups(dict(raw.get("people") or {}))
 
@@ -340,7 +384,8 @@ class Roster:
             stem = t.replace("战队", "").replace("支局", "").strip()
             for form in (t, stem, stem + "战队", stem + "支局", stem + "战区"):
                 self._aliases[form] = t
-        log.info("名册：%d 人 / %d 个战队", len(self.people), len(self.teams))
+        if not quiet:
+            log.info("名册：%d 人 / %d 个战队", len(self.people), len(self.teams))
 
     def maybe_reload(self) -> bool:
         """
@@ -492,11 +537,15 @@ class Roster:
 
 # 「业务类型」的各种写法 -> 清单里的三个口径。按顺序匹配，先命中先算。
 # 号卡类放最前：「新增号卡」是号卡不是宽带。
+# 「策反」（把异网用户策反过来）算新增，放最前 —— 「异网策反」不能因为「异网」被当成号卡（09-29 用户定）；
+# 「办理」也算新增，但放最后 —— 「续约办理」还是存量。
 _KIND_ALIASES = (
+    ("新增", ("策反",)),
     ("单C", ("单C", "单c", "单Ｃ", "号卡", "山城卡", "副卡", "携转", "异网")),
     ("新增", ("新增", "新装", "新办", "新开", "新入网")),
     ("存量", ("存量", "续约", "续签", "续费", "改", "升档", "升级", "加装", "融合", "老用户",
               "平迁", "高迁", "负迁", "迁转", "提值", "拆机维系", "维系")),
+    ("新增", ("办理",)),
 )
 
 
@@ -532,8 +581,19 @@ def derive(kind: str, fee: str) -> dict:
     晒单文字的显式字段里取。
     """
     fee = _TECH_TAG.sub("", (fee or "").strip())
+    # 9.9（AI 守护 / 看家）按 10 分算（09-29 用户定）；不换的话整数口径会拆成 9 和 9
+    fee = re.sub(r"(?<![\d.])9\.9(?![\d.])", "10", fee)
+    fee = _YEARLY_FEE.sub(lambda m: f"{int(m.group(1)) // 10}{m.group(2)}", fee)
     raw_kind = (kind or "").strip()
     kind = normalize_kind(raw_kind)
+    equity_with_tier = False
+    if _IS_EQUITY.search(fee):
+        # 「239权益兑换FTTR」「239加699权益金兑换FTTR加10元云盒」：第一个数是宽带档位 → 照常算新增 / 续约，
+        # 权益金币数和兑换来的东西不算钱（09-30 回归测试：以前整单积分记 0、标黄）
+        stripped = _EQUITY_AMOUNT.sub(_drop_equity_amount, fee)
+        first = _NUM.search(stripped)
+        if first and int(first.group()) in FUSION_TIERS:
+            fee, equity_with_tier = stripped, True
     nums = [int(x) for x in _NUM.findall(fee)]
     base = nums[0] if nums else 0
 
@@ -548,8 +608,12 @@ def derive(kind: str, fee: str) -> dict:
                tier=final, kind=kind)
 
     # 权益金币（699 兑换 FTTR 之类）：数字不是档位。留给人看，别算进去
-    if _IS_EQUITY.search(fee) and not up:
+    if _IS_EQUITY.search(fee) and not up and not equity_with_tier:
         out["tier"] = 0
+        if kind == "存量":
+            # 存量客户用权益金兑换 FTTR / 云盒（「699权益兑换FTTR」）：算一次长续约，积分 0，不用核对（09-30 用户）
+            out["renew"] = 1
+            return out
         out["points_unknown"] = True          # 让 build_order 标黄：是否计业绩要人定
         out["equity"] = True
         return out
@@ -573,10 +637,19 @@ def derive(kind: str, fee: str) -> dict:
     # 新增一条宽带，没有融合档位，不算中高套。
     # 「199+副宽」「99+副宽」是融合套餐带副宽 —— 带「+」的一律不走这里，
     # 由下面的新增分支按主宽 + 副宽数（以前 99/79+副宽 被当成单宽只记 1 条）
-    if _IS_SOLO.search(fee) and not up and "+" not in fee:
+    # 新增纯加装（「10元云盒」「云盒」，没有宽带档位）：不是新开宽带，只记积分（09-29 用户：有这种说法）
+    if kind == "新增" and _PURE_ADDON.search(fee) and not _SUB_BB.search(fee):
+        out["points"] = _part_total(fee)
+        out["pure_addon"] = True
+        return out
+
+    if _IS_SOLO.search(fee) and not up and not re.search(r"[+＋➕]|加|十(?=\s*\d)", fee):
         if kind != "存量":
             out["kind"] = "新增"
             out["broadband"] = 1
+        elif _SUB_BB.search(fee):
+            # 存量单办副宽：副宽是新开的一条宽带，算新增宽带（09-29 用户定）
+            out["broadband"] = len(_SUB_BB.findall(fee))
         out["points"] = final + addon
         out["solo"] = True
         out["solo_giga"] = final in SOLO_GIGA_TIERS
@@ -587,7 +660,8 @@ def derive(kind: str, fee: str) -> dict:
         out["broadband"] = 1 + len(_SUB_BB.findall(fee))
         if final >= HIGH_TIER_MIN:
             out["high"] = 1
-        out["points"] = final + addon
+        # 积分 = 写出来的钱都加上（档位 + 加装 + 副宽，09-29 用户定：看价值总和）；写了「改」的只算改成那段
+        out["points"] = max(_part_total(fee[up.start(2):] if up else fee), 0)
     elif kind == "单C":
         out["card"] = 1
         out["points"] = final
@@ -601,6 +675,8 @@ def derive(kind: str, fee: str) -> dict:
         #   没写原档的高迁 / 提值   长续约 1，积分待核对
         #   没有档位数字的（云盒、+10） 纯加装：长续约 0，积分 = 附加
         lift = _LIFT.search(fee)
+        # 存量带副宽：每个副宽是新开的一条宽带，算新增宽带（09-29 用户定）；续约本身照下面算
+        out["broadband"] = len(_SUB_BB.findall(fee))
         if up:
             before = _part_total(fee[:up.start(2)])
             after = _part_total(fee[up.start(2):])
@@ -631,12 +707,12 @@ def derive(kind: str, fee: str) -> dict:
             out["points"] = addon
             out["points_unknown"] = True
         elif re.search(r"续|平迁", fee) or re.search(r"续|平迁", raw_kind) or base >= 19:
-            # 平续 / 只写了档位的一般续约：长续约记 1，只算附加值
+            # 平续 / 只写了档位的一般续约：长续约记 1，积分 = 总和 − 原档位（加装、副宽都算：「199续约加副宽60」60）
             out["renew"] = 1
-            out["points"] = addon
+            out["points"] = max(_part_total(fee) - base, 0)
         else:
             # 纯加装（「云盒」「+10」），不算长续约，只算附加值
-            out["points"] = addon
+            out["points"] = max(_part_total(fee), addon)
     return out
 
 
@@ -680,12 +756,40 @@ class TeamStat:
     rank: int = 0
 
 
+class BranchRoster:
+    """「全部」视图用的名册：战队 = 支局（按总表分类的顺序），每个支局一个「全支局」小组；查人走四张名册。"""
+    ALL = "（按支局汇总）"
+
+    def __init__(self, branches, rosters=None) -> None:
+        self.teams = list(branches)
+        self.people: dict = {}
+        self._rs = rosters
+
+    def normalize_team(self, name: str) -> str:
+        return (name or "").strip()
+
+    def lookup(self, person: str) -> tuple[str, str]:
+        if self._rs is None:
+            return "", ""
+        i = self._rs.identify_name(person)
+        return (i.group or i.region + i.role, i.branch) if i.role != "未识别" else ("", "")
+
+    def groups(self) -> list:
+        return [GroupInfo(team=b, label="全支局", members=self.ALL) for b in self.teams]
+
+    def maybe_reload(self) -> bool:
+        return False
+
+
 class Campaign:
     """一次活动的全部订单 + 汇总。落盘，跨重启不丢。"""
 
     def __init__(self, roster: Roster, targets: Targets | None = None,
-                 path: str | Path | None = None) -> None:
+                 path: str | Path | None = None, rosters=None) -> None:
         self.roster = roster
+        # 多群模式：四张名册（regions.RosterSet）。有它就按人分城区 / 农村、活动 / 非活动
+        self.rosters = rosters
+        self._readonly = False
         self.targets = targets or Targets()
         self.path = Path(path) if path else DATA / "campaign.json"
         self.orders: list[Order] = []
@@ -720,6 +824,8 @@ class Campaign:
             log.info("按当前名册重新归组：%d 单", moved)
 
     def _save(self) -> None:
+        if self._readonly:
+            return                       # 区域视图只读，不许写台账
         tmp = self.path.with_suffix(".tmp")
         try:
             tmp.write_text(json.dumps(
@@ -735,9 +841,51 @@ class Campaign:
         名册文件变了就重载并把已有单重新归队。记单前、出表前各调一次 ——
         台账只允许机器人这一个进程写，别的进程（MCP）只改名册文件。
         """
-        if self.roster.maybe_reload():
+        if self._readonly:
+            return
+        changed = self.roster.maybe_reload()
+        if self.rosters is not None:
+            changed = self.rosters.maybe_reload() or changed
+        if changed:
             moved = self.reassign()
             log.info("按新名册重新归队：%d 单有变化", moved)
+
+    def view_all(self, branches: list) -> "Campaign":
+        """
+        全部人的单按【落地支局】汇总（攻坚群问答、TeleAgent「全部」用，和总表一个口径）。只读。
+        每一单复制一份把 战队 换成支局，原单不动。
+        """
+        v = Campaign.__new__(Campaign)
+        v.rosters = None
+        v._readonly = True
+        v.roster = BranchRoster(branches, self.rosters)
+        v.targets = Targets()
+        v.path = self.path
+        v._seen = set()
+        v._lock = threading.Lock()
+        with self._lock:
+            v.orders = [replace(o, team=o.branch or "未归属", group=BranchRoster.ALL) for o in self.orders]
+        return v
+
+    def view(self, region: str, targets: "Targets | None" = None, day: str = "") -> "Campaign":
+        """
+        某个区域的活动人员的单（城区 / 农村活动群的通报、晒单表用）。只读：不存盘、不重新归组。
+        订单对象和主台账是同一批，统计时只读不改。
+        day（YYYY-MM-DD，不给 = 今天）：表里的小组按那天的活动名单画（国庆每天名单不同，09-29）。
+        """
+        from .regions import ACTIVITY
+        v = Campaign.__new__(Campaign)
+        v.rosters = None
+        v._readonly = True
+        day = day or datetime.now().strftime("%Y-%m-%d")
+        v.roster = self.rosters.on(day).activity[region] if self.rosters is not None else self.roster
+        v.targets = targets or self.targets
+        v.path = self.path
+        v._seen = set()
+        v._lock = threading.Lock()
+        with self._lock:
+            v.orders = [o for o in self.orders if o.region == region and o.role == ACTIVITY]
+        return v
 
     def add(self, order: Order) -> bool:
         """
@@ -939,7 +1087,52 @@ class Campaign:
         return rows
 
     # 归组时加的备注：重算前先摘掉，免得名册改了以后旧备注还挂着
-    _PLACE_NOTES = ("晒单人不在名册，按揽收人归组", "揽收人不在名册且没写支局", "揽收人不在名册")
+    _PLACE_NOTES = ("晒单人不在名册，按揽收人归组", "晒单人和揽收人都不在名册",
+                    "揽收人不在名册且没写支局", "揽收人不在名册")
+
+    def _place_multi(self, order: "Order") -> None:
+        """
+        多群模式归组（09-29）：按人分类，不按群。
+          ① 发消息的人 → 四张名册 → 城区 / 农村 × 活动 / 非活动
+          ② 对不上 → 按晒单里的「揽收人」再查一次
+          ③ 还对不上 → 未识别：只进攻坚群总表（按晒单里写的支局），标黄
+        活动人员的 小组 / 战队 按他那区的活动名册；非活动人员 战队 记成他的支局。
+        落地支局（总表用）= 晒单里写的「支局」；没写按人查到的支局。
+        """
+        from .regions import ACTIVITY, UNKNOWN, branch_stem
+        rs = self.rosters.on((order.at or "")[:10])     # 国庆每天名单不同：按这单那天的名单认人（09-29）
+        if not order.written_branch:
+            # 第一次归组时 team 还是晒单里写的「支局」（build_order 放进来的），先存下来；
+            # 老记录没有这个字段，branch 里存的就是当时写的支局
+            order.written_branch = order.branch or branch_stem(order.team)
+        ident = rs.identify_sender(order.sender_id, order.written_branch) if order.sender_id else None
+        poster_branch = ident.branch if ident is not None and ident.role != UNKNOWN else ""
+        order.poster = ident.name if ident and ident.role != UNKNOWN else ""
+        if (ident is None or ident.role == UNKNOWN) and order.collector:
+            by_collector = rs.identify_name(order.collector, order.written_branch)
+            if by_collector.role != UNKNOWN:
+                ident = by_collector
+                if order.sender_id:
+                    order.note = (order.note + " 晒单人不在名册，按揽收人归组").strip()
+        if ident is not None and ident.role != UNKNOWN:
+            order.region, order.role, order.community = ident.region, ident.role, ident.community
+            if ident.role == ACTIVITY:
+                order.group, order.team = ident.group, ident.team
+            else:
+                order.group, order.team = "", ident.branch
+        # 总表归哪个支局（09-29 用户定）：按揽收人查名册 → 他的支局；揽收人没写 / 查不到 → 晒单里写的支局 → 晒单人的支局
+        #（用户确认过不会出现揽收人是别的支局的人）
+        by_collector = rs.identify_name(order.collector, order.written_branch) if order.collector else None
+        if by_collector is not None and by_collector.role != UNKNOWN and by_collector.branch:
+            order.branch = by_collector.branch
+        else:
+            order.branch = order.written_branch or poster_branch or (ident.branch if ident is not None else "")
+        if ident is None or ident.role == UNKNOWN:
+            order.region, order.role, order.community = "", UNKNOWN, False
+            order.needs_review = True
+            if "都不在名册" not in order.note:
+                order.note = (order.note + " 晒单人和揽收人都不在名册").strip()
+            order.team = order.branch
 
     def _place(self, order: "Order") -> None:
         """
@@ -950,6 +1143,9 @@ class Campaign:
           ③ 揽收人也查不到 -> 按晒单里写的「支局」只归战队，标待核对
         名册优先于晒单里手填的「支局」：支局可能填错，小组也只能从名册查。
         """
+        if self.rosters is not None:
+            self._place_multi(order)
+            return
         from .checkin import sender_name       # 账号 ID -> 名册姓名，和打卡归组同一套
         order.poster = sender_name(order.sender_id, self.roster) if order.sender_id else ""
         grp, team = self.roster.lookup(order.poster) if order.poster else ("", "")
@@ -1006,7 +1202,8 @@ _VAL = r"(?!\S*[:：])(\S+)"
 _FIELDS = {
     "branch":    re.compile(r"支" + _SP + r"局" + _SP + r"[:：]" + _SP + _VAL),
     "kind":      re.compile(r"业务类型" + _SP + r"[:：]" + _SP + _VAL),
-    "fee":       re.compile(r"办理套餐" + _SP + r"[:：]" + _SP + _VAL),
+    # 办理套餐取到这一行结尾（「129改139 加10」员工会打空格），再在下一个字段名处截断，见 _fee_value
+    "fee":       re.compile(r"办理套餐" + _SP + r"[:：]" + _SP + r"([^\n\r]*)"),
     "points":    re.compile(r"价值积分" + _SP + r"[:：]" + _SP + r"(\d+)"),
     "cards":     re.compile(r"号卡数量" + _SP + r"[:：]" + _SP + r"(\d+)"),
     "collector": re.compile(r"揽收人" + _SP + r"[:：]" + _SP + _VAL),
@@ -1016,19 +1213,40 @@ _FIELDS = {
 # 值只取一个词，遇到空白或下一个「是否加载」就停。以前用 (.*) 吃到行尾，
 # 两个字段挤一行（「是否加载智屏：否 🌐是否加载FTTR：否」）时智屏那格
 # 抓到「否 🌐是否加载FTTR：否」，不在否定词表里，被判成已加载（对抗测试踩过）
-_LOADED_VAL = r"((?:(?!是否加载)\S)*)"
+_LOADED_VAL = r"((?:(?!是否)\S)*)"
 _LOADED = {
     "ai":   re.compile(r"是否加载" + _SP + r"AI" + _SP + r"[:：]" + _SP + _LOADED_VAL, re.I),
     "box":  re.compile(r"是否加载云盒" + _SP + r"[:：]" + _SP + _LOADED_VAL),
     "scrn": re.compile(r"是否加载智屏" + _SP + r"[:：]" + _SP + _LOADED_VAL),
     "fttr": re.compile(r"是否加载" + _SP + r"FTTR" + _SP + r"[:：]" + _SP + _LOADED_VAL, re.I),
 }
+# 新模板（09-29）两栏：只认「是」，空着 / 否都是否；模板里没这栏（旧模板）记空串
+_UPGRADED = {
+    "up_giga": re.compile(r"是否升级" + _SP + r"(?:千兆|1000" + _SP + r"M?)" + _SP + r"(?:[/／、或]" + _SP + r"500" + _SP + r"(?:M|兆)?)?"
+                          + _SP + r"[:：]" + _SP + _LOADED_VAL, re.I),
+    "up_2000": re.compile(r"是否升级" + _SP + r"(?:2000|两千|二千)" + _SP + r"(?:M|兆)?" + _SP + r"[:：]" + _SP + _LOADED_VAL, re.I),
+}
 # 模板里其它字段名：抓「是否加载」的值时碰到这些就到头了
-_NEXT_FIELD = re.compile(r"揽收人|号卡数量|业务类型|办理套餐|支局|价值积分|业务号码|是否加载|小组")
+_NEXT_FIELD = re.compile(r"揽收人|号卡数量|业务类型|办理套餐|支局|价值积分|业务号码|是否加载|是否升级|小组")
 _NEGATIVE = {"", "无", "否", "没有", "没", "暂无", "无需", "不需要", "不用", "不要", "未加载",
              "未", "不", "n", "no", "none", "x", "×", "不加载", "-", "/", "0"}
 # 以这些字开头的也算否：「未装」「不装」「无此项」「没加」……
 _NEGATIVE_PREFIX = ("未", "不", "无", "没", "否")
+
+
+def _upgraded(text: str, key: str) -> str:
+    """「是否升级千兆/500M：是」→ 是；空着 / 否 → 否；模板里没这一栏 → 空串。"""
+    m = _UPGRADED[key].search(text)
+    if not m:
+        return ""
+    v = re.sub(r"[^\w]", "", _NEXT_FIELD.split(m.group(1), 1)[0])
+    return "是" if v.startswith("是") else "否"
+
+
+def _fee_value(raw: str) -> str:
+    """办理套餐这一行：截到下一个字段名，去掉尾巴上的 emoji / 标点。"""
+    v = _NEXT_FIELD.split(raw or "", 1)[0]
+    return re.sub(r"[^\w）)%]+$", "", v.strip())
 
 
 def _loaded(text: str, key: str) -> bool:
@@ -1060,7 +1278,7 @@ _ASKING = re.compile(r"[?？]|请教|怎么填|填对|对不对|是填|还是填
 # 晒单模板里会出现的字段名。数「命中了几个」来判断一段文字像不像晒单 ——
 # 严格解析失败但命中够多的，交给模型容错解析（见 extract.py）
 _FIELD_WORDS = ("支局", "业务类型", "办理套餐", "套餐", "价值积分", "积分", "号卡数量",
-                "揽收人", "揽收", "是否加载", "业务号码", "晒单")
+                "揽收人", "揽收", "是否加载", "是否升级", "业务号码", "晒单")
 
 
 def looks_like_order(text: str) -> int:
@@ -1078,8 +1296,11 @@ def parse_fields(text: str) -> dict:
     for k, rx in _FIELDS.items():
         m = rx.search(text or "")
         got[k] = m.group(1).strip() if m else ""
+    got["fee"] = _fee_value(got["fee"])
     for k in _LOADED:
         got[k] = _loaded(text or "", k)
+    for k in _UPGRADED:
+        got[k] = _upgraded(text or "", k)
     return got
 
 
@@ -1099,8 +1320,16 @@ def build_order(fields: dict, text: str, msg_id: str = "", at: str = "",
     if re.search(r"[:：]", kind + fee) or kind in _FIELD_WORDS or fee in _FIELD_WORDS:
         return None
 
-    d = derive(kind, fee)
+    # kpi 引用本模块，放函数里免得循环引用
+    from .kpi import strip_speed, sub_broadbands   # 「139续约升500M」的 500 不是档位；副宽 60 算千兆
+    d = derive(kind, strip_speed(fee).strip() or fee)
     raw_kind, kind = kind, normalize_kind(kind)
+    # 「业务类型:新增 / 套餐:109改139」= 存量提值（09-30 用户）：按存量算 —— 新增宽带 0、长续约 1、积分 = 差价；
+    # 写了策反 / 异网 / 携转的是异网客户转过来，照旧算新增
+    new_with_change = kind == "新增" and bool(_UPGRADE.search(fee)) and not re.search(r"策反|异网|携转", raw_kind + fee)
+    if new_with_change:
+        kind = "存量"
+        d = derive("存量", strip_speed(fee).strip() or fee)
     # 号卡张数：只看【纠正后】的类型 —— 「业务类型:新增 / 套餐:19山城卡」
     # 经 derive 已经是单C。填了张数用张数，没填按 1 张（模板里这格常留空，
     # 以前留空记成 0，单号卡列系统性少计）；不是号卡单一律 0
@@ -1128,34 +1357,44 @@ def build_order(fields: dict, text: str, msg_id: str = "", at: str = "",
         broadband=d["broadband"], high=d["high"], renew=d["renew"],
         card=card, box=box,
         fttr=1 if fields.get("fttr") else 0,
+        loaded=",".join(n for k, n in (("box", "云盒"), ("ai", "AI"), ("scrn", "智屏"), ("fttr", "FTTR"))
+                        if fields.get(k)),
+        up_giga=fields.get("up_giga") or "", up_2000=fields.get("up_2000") or "",
         points=points,
         source=source, msg_id=msg_id,
         # 号码哈希和单号是「同一单重发」的判据；小组成员是照片时代留下的
         contact=_contact_key(text), members=_members_of(text),
         serial=_serial_of(text),
     )
-    # 千兆/500兆：晒单模板里没有这个字段，只能按档位推。
-    # 而实测存量升档到 139 未必有千兆（原表 129改139 是 0），
-    # 所以只对【新增】且档位够的才算，存量的标待核对。
-    # ⚠️ 要用 derive 纠正后的类型：「新增 / 399橙分期」纠正后是单C，
-    # 号卡的 399 是月费不是带宽，按原始类型判会把手机卡记成千兆宽带（实测踩过）
-    if d.get("kind") == "单C":
-        pass
-    elif d.get("solo"):
-        # 单宽 / 包年查表：390 包年只有 50M，1390 包年才是 500M（以前按数字 ≥139 记，全错）
-        o.giga = 1 if (d.get("solo_giga") and d.get("kind") == "新增") else 0
-    elif d.get("kind") == "新增" and d["tier"] >= HIGH_TIER_MIN:
-        o.giga = 1
-    elif d["tier"] >= HIGH_TIER_MIN:
+    # 千兆/500兆（活动群的数）：和攻坚群总表同一套判定（kpi：新增看速率；存量看「是否升级」栏 + 提值 ≥10；
+    # 副宽 60 另算），但【只数条数、不乘国庆系数】—— 2000M 高迁 / 平签 / 低签在活动群都记 1（09-29 用户定）。
+    # ⚠️ 用 derive 纠正后的类型：「新增 / 399橙分期」纠正后是单C，不算宽带
+    from .kpi import compute as kpi_compute
+    k = kpi_compute(o.kind, fee, o.loaded, o.card or 1, o.up_giga, o.up_2000)
+    o.giga = k.giga_lines
+    # 新增宽带 / 中高套 / 云盒AI智屏 / 单号卡 也一样：和总表同一套判定，活动群只记个数（09-29 用户定）。
+    # 新增宽带不折算（780 包年记 1）、明星机赠送不算；中高套 239 以上也记 1；云盒/AI/智屏 写了价钱才算、FTTR 不算进这列
+    o.broadband, o.high, o.box = k.bb_lines, (1 if k.high else 0), k.box_items
+    if o.kind == "单C":
+        o.card = int(k.card)
+    if any("待核对" in n for n in k.notes):
         o.needs_review = True
-        o.note = "千兆待核对"
+        o.note = (o.note + " " + "；".join(n for n in k.notes if "待核对" in n)).strip()
     # 业务类型写了个认不出的词（既不像新增也不像存量/单C）：
     # 照原文记，标出来让人看一眼，别让它悄悄按 0 计
+    # 「业务类型:新增 / 套餐:109改139」：新增不该有「改」，用户会上强调别这样报（09-29）；出现了照算，标黄让人核对
+    if new_with_change:
+        o.needs_review = True
+        o.note = (o.note + " 新增单写了「改」，已按存量提值算，请核对").strip()
     if o.kind not in ("新增", "存量", "单C"):
         o.needs_review = True
         o.note = (o.note + f" 业务类型「{raw_kind}」待核对").strip()
     # 高迁 / 提值 / 负迁 这类差价算不出来的，晒单里没写积分就标出来
-    if d.get("downgrade"):
+    if d.get("downgrade") and k.sign2000 == "低签":
+        # 2000M 低签（399改299、239+10改239 勾了 2000M）：活动记长续约 1、积分 0；总表千五 ×1.1（09-30 用户）
+        o.renew = 1
+        o.note = (o.note + " 2000M低签").strip()
+    elif d.get("downgrade"):
         # 降档（139改99、负迁、139改99+10 总和变小）：照记，不算长续约不算分
         o.note = (o.note + " 降档不计业绩").strip()
     elif d.get("equity"):

@@ -22,6 +22,7 @@ from .backup import BackupSettings
 from .campaign import CampaignSettings
 from .checkin import CheckinSettings
 from .extract import ExtractSettings
+from .zongbiao import GuoqingSettings
 from .image import OCRSettings
 from .llm import LLMSettings
 from .stickers import StickerSettings
@@ -90,6 +91,7 @@ class Bundle:
     checkin: CheckinSettings
     backup: BackupSettings
     groups: list = field(default_factory=list)
+    guoqing: object = None       # zongbiao.GuoqingSettings（攻坚群支局总表，09-29）
 
 
 def _as_list(v, where: str) -> list:
@@ -181,6 +183,7 @@ def _build(raw: dict) -> Bundle:
     backup = BackupSettings(**{k: v for k, v in (raw.get("backup") or {}).items()
                                if k in BackupSettings.__dataclass_fields__})
     backup.admins = [str(a) for a in _as_list(backup.admins, "backup.admins")]
+    backup.notify = [str(a) for a in _as_list(backup.notify, "backup.notify")]
     for slot in checkin.slots or ():
         for k in ("start", "end"):
             slot[k] = _as_hhmm(slot.get(k, ""), f"checkin.slots.{slot.get('name', '')}.{k}")
@@ -190,7 +193,7 @@ def _build(raw: dict) -> Bundle:
 
     return Bundle(g, Matcher(rules, strategy=g.match_strategy), llm, ocr, tally,
                   dedupe, stickers, campaign, bulletin, assistant, extract, checkin, backup,
-                  _parse_groups(raw.get("groups")))
+                  _parse_groups(raw.get("groups")), GuoqingSettings.from_dict(raw.get("guoqing")))
 
 
 class ConfigStore:
@@ -277,6 +280,11 @@ class ConfigStore:
     def backup_settings(self) -> BackupSettings:
         with self._lock:
             return self._bundle.backup
+
+    def guoqing_settings(self):
+        """config.yaml 的 guoqing 段：攻坚群支局总表（支局分类、附件一目标、PK 金额）。"""
+        with self._lock:
+            return self._bundle.guoqing
 
     def groups(self) -> list:
         """config.yaml 的 groups 段：[GroupInfo(chat_id, name, role)]。"""

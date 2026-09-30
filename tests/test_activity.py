@@ -120,7 +120,14 @@ def test_commands_and_gate():
 def test_roster_admin_only():
     check("只能管理员" in send(files=[("roster", "")], sender="someone"), "非管理员发名册被拦")
     eq(send(files=[("other", "")], sender="someone"), "", "非管理员发别的 Excel 不理")
-    check(send(files=[("roster", "")]).startswith("名册已更新"), "管理员发名册导入")
+    from botcore import regions
+    if regions.multi_enabled(store):
+        # 多群模式（09-29）：必须先说是哪张名册
+        check("请先说是哪张名册" in send(files=[("roster", "")]), "多群模式：没先说是哪张名册不导")
+        check("2 分钟内" in send("城区活动名册"), "先说是哪张")
+        check(send(files=[("roster", "")]).startswith("城区活动名册已更新"), "再发 Excel：导进城区活动名册")
+    else:
+        check(send(files=[("roster", "")]).startswith("名册已更新"), "管理员发名册导入")
 
 
 run(test_parse)

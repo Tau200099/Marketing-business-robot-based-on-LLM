@@ -41,6 +41,16 @@ log = logging.getLogger("botcore.extract")
 _FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.MULTILINE)
 
 
+def _yes_no(v) -> str:
+    """模型给的「是否升级」：是 / 否 / 空串（没这一栏）。"""
+    if v is True:
+        return "是"
+    s = str(v or "").strip()
+    if not s or s.lower() in ("none", "null"):
+        return ""
+    return "是" if s == "是" or s.lower() in ("true", "1", "yes") else "否"
+
+
 @dataclass
 class ExtractSettings:
     enabled: bool = False
@@ -59,7 +69,7 @@ class ExtractSettings:
 SYSTEM_PROMPT = """你从中国电信营销群的「晒单」文字里抽取字段。这些文字本来有固定模板，但发的人常把字段名写歪、漏冒号、调换顺序。
 
 只输出一个 JSON 对象，不要代码块、不要解释：
-{"is_order": true或false, "multiple": true或false, "kind": "", "fee": "", "branch": "", "collector": "", "points": "", "cards": "", "ai": false, "box": false, "scrn": false, "fttr": false}
+{"is_order": true或false, "multiple": true或false, "kind": "", "fee": "", "branch": "", "collector": "", "points": "", "cards": "", "ai": false, "box": false, "scrn": false, "fttr": false, "up_giga": "", "up_2000": ""}
 
 字段说明（【只抽文字里明确写了的，没写就留空串或 false，绝不推测】）：
 - is_order：这段文字是不是在报告【一笔已办成】的业务。问问题、转发模板、催晒单、闲聊都是 false。
@@ -71,6 +81,7 @@ SYSTEM_PROMPT = """你从中国电信营销群的「晒单」文字里抽取字�
 - points：价值积分，只填数字。文字里没写就留空 —— 不要按套餐算。
 - cards：号卡数量，只填数字。
 - ai / box / scrn / fttr：是否加载 AI视联网 / 云盒 / 智屏 / FTTR。写了「是」「1」「已加载」「有」才 true；留空、无、否 都是 false。
+- up_giga / up_2000：模板里「是否升级千兆/500M」「是否升级2000M」两栏。写了「是」填 "是"；写了否或空着填 "否"；文字里根本没有这一栏填 ""。
 
 注意：「[号码]」「[手机号]」是脱敏占位符，忽略即可。"""
 
@@ -171,4 +182,5 @@ class FieldExtractor:
             "cards": digits(data.get("cards")),
             "ai": as_bool(data.get("ai")), "box": as_bool(data.get("box")),
             "scrn": as_bool(data.get("scrn")), "fttr": as_bool(data.get("fttr")),
+            "up_giga": _yes_no(data.get("up_giga")), "up_2000": _yes_no(data.get("up_2000")),
         }

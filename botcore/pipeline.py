@@ -37,6 +37,7 @@ from .campaign import (Campaign, NotRosterSheet, Roster, RosterImportError, buil
                        has_multiple_orders, looks_like_order, parse_order)
 from .extract import ExtractSettings, FieldExtractor
 from .faces import FaceError, FaceIndex
+from . import regions
 from .ledger_tools import resolve_period
 from .paths import DATA
 from .checkin import CheckinRecorder
@@ -78,6 +79,24 @@ def _checkin_receipt(results) -> str:
     """单聊打卡的回执，一张一行：「打卡已记：9.28 14:30 下午｜现场拦截」。"""
     lines = []
     for status, info in results or [("error", None)]:
+        if status == "invalid":
+            rec, deadline = info
+            at = rec.at
+            when = f"{int(at[5:7])}.{int(at[8:10])} {at[11:16]}"
+            slot = rec.slot or "21:00 以后，不计入统计"
+            until = datetime.fromtimestamp(deadline).strftime("%H:%M")
+            if rec.source == "待判定":
+                lines.append(f"打卡已记：{when} {slot}｜类型一时判不出，先按无效打卡处理。"
+                             f"请在 10 分钟内（{until} 前）重新拍一张发来，有效的会替换这条")
+            else:
+                lines.append(f"打卡已记：{when} {slot}｜无效打卡。"
+                             f"这张判为无效打卡，请在 10 分钟内（{until} 前）重新拍一张发来，有效的会替换这条")
+            continue
+        if status == "replaced":
+            rec, old_at = info
+            when = f"{int(old_at[5:7])}.{int(old_at[8:10])} {old_at[11:16]}"
+            lines.append(f"打卡已记：{when} {rec.slot or '时段外'}｜{rec.label}（已替换 {old_at[11:16]} 那条无效打卡）")
+            continue
         if status == "recorded":
             at = info.at
             when = f"{int(at[5:7])}.{int(at[8:10])} {at[11:16]}"
@@ -90,10 +109,18 @@ def _checkin_receipt(results) -> str:
             lines.append(f"这张之前已经记过了{when}")
         elif status == "not_watermark":
             lines.append("这张不是今日水印照片，没有记打卡")
+        elif status == "download_failed":
+            lines.append("照片没下载下来，请重发这一张")
+        elif status == "non_activity":
+            lines.append("你不在活动名单里，请核实自己账号信息并重新发送")
+        elif status == "unknown":
+            lines.append("无法查询到您的账号姓名信息，请修改账号信息或打卡照人员信息后重新发送")
         elif status == "no_time":
             lines.append("水印上没认出拍摄时间，没有记打卡，换张清楚的再发")
         else:
             lines.append("这张没记上，出错了，稍后再发一次")
+    if len(lines) > 1:
+        lines = [f"第{i}张：{t}" for i, t in enumerate(lines, 1)]
     return "\n".join(lines)
 
 
@@ -175,11 +202,23 @@ class Pipeline:
         self.samples = SampleCollector(platform, store.ocr_settings, judge=self.checkin.judge_blob)
         # 人脸识别（只认少数几个人、本人已同意）：管理员单聊录入 / 认人
         self.faces = FaceIndex()
+        # 多群（09-29 国庆版）：四张名册 + 支局长名单；config 里配了农村群 / 攻坚群才启用
+        self.rosters = regions.RosterSet()
+        self._roster_pending: dict[tuple[str, str], tuple[str, float]] = {}   # (会话, 人) -> (哪张名册, 过期)
+        # 单聊照片「收到了还没回执」的：重启时挨个告诉他重发，不悄悄丢（09-29）
+        self._inflight_photos: dict[str, InboundMessage] = {}
+        self._tls = threading.local()           # 问答助手：这条消息所在的群 → 查哪个区
+        self._inflight_lock = threading.Lock()
+        # 支局长打卡点检（人脸）：每张打卡照都过一遍，认出支局长就记下时间（09-29）
+        from .chiefs import ChiefBoard
+        self.chief_board = ChiefBoard(self.faces, self.rosters, store)
+        self.checkin.on_photo = self.chief_board.submit       # 交给人脸队列就返回，和打卡判定同时跑
         self._face_pending: dict[tuple[str, str], tuple[str, str, float]] = {}   # (会话, 人) -> (动作, 姓名, 过期)
         self.checkin_bulletin = None          # bot.py 里挂上（打卡通报）
         self._excel_last: dict[str, float] = {}  # 单聊要表格的冷却
         self.checkin_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="checkin")
         self.checkin.notify = self._notify_admins          # 视觉模型额度用完 / 换模型时单聊告诉管理员
+        self.checkin.identify = self._checkin_identity     # 多群：只记活动人员的打卡
         self.checkin.start_retry(self.checkin_pool)        # 「待判定」每 10 分钟补判
         self.pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="work")
         # 图片单独一个池。OCR 是串行的（引擎不保证线程安全），一张 3~5 秒，
@@ -244,6 +283,9 @@ class Pipeline:
         if msg.chat_type == "group" and settings.require_at and not msg.mentions_bot:
             return
 
+        if msg.chat_type == "p2p" and msg.has_image and msg.msg_id:
+            with self._inflight_lock:
+                self._inflight_photos[msg.msg_id] = msg
         pool = self.ocr_pool if msg.has_image else self.pool
         try:
             pool.submit(self._process, msg, t0)
@@ -256,6 +298,37 @@ class Pipeline:
 
     def _process(self, msg: InboundMessage, t0: float) -> None:
         try:
+            self._process_inner(msg, t0)
+        finally:
+            if not getattr(msg, "_checkin_queued", False):
+                self._done_photo(msg)
+
+    def _done_photo(self, msg: InboundMessage) -> None:
+        with self._inflight_lock:
+            self._inflight_photos.pop(msg.msg_id, None)
+
+    def notify_unfinished(self, timeout: float = 8.0) -> int:
+        """关机前：还没回执的单聊照片，挨个回「请重发」。返回提醒了几条。"""
+        with self._inflight_lock:
+            pending = list(self._inflight_photos.values())
+            self._inflight_photos.clear()
+        deadline = time.time() + timeout
+        n = 0
+        for msg in pending:
+            if time.time() > deadline:
+                log.warning("关机前没来得及提醒的照片消息：%s", msg.msg_id)
+                continue
+            try:
+                self.platform.reply(msg, "机器人正在重启，这条的照片还没处理，请 1 分钟后重新发一次", None)
+                n += 1
+            except Exception:
+                log.exception("关机前提醒重发失败 %s", msg.msg_id)
+        if n:
+            log.warning("关机前提醒了 %d 条单聊照片消息重发", n)
+        return n
+
+    def _process_inner(self, msg: InboundMessage, t0: float) -> None:
+        try:
             _settings, matcher = self.store.snapshot()
 
             # 群里喊「通报」：直接出报表，不走规则和模型
@@ -266,6 +339,12 @@ class Pipeline:
                 return
             # 管理员单聊「新活动 名称 10.1-10.4」「当前活动」「结束活动」
             if self._handle_activity_command(msg):
+                return
+            # 管理员单聊「农村活动名册」「城区支局名册」「支局长名单」…：接下来 2 分钟内发的 Excel 导进那张
+            if self._handle_roster_command(msg):
+                return
+            # 管理员单聊「休息 杨钰航」「补记 严健齐 10:37」：支局长点检表人工改
+            if self._handle_chief_command(msg):
                 return
             # 管理员单聊「群号核对」：往 config 里配的每个群发一句群名，核对群号对不对
             if self._handle_group_check(msg):
@@ -423,16 +502,103 @@ class Pipeline:
         self.platform.reply(msg, activity.off_notice(), msg.sender_id or None)
         return True
 
+    def _remind_unknown(self, sender: str, collector: str = "") -> None:
+        """多群：认不出的人晒了单 → 单聊提醒管理员补名册 / 账号对照（同一个账号一天提醒一次）。"""
+        key = (sender or collector, datetime.now().strftime("%Y-%m-%d"))
+        seen = getattr(self, "_unknown_reminded", set())
+        if key in seen:
+            return
+        seen.add(key)
+        self._unknown_reminded = seen
+        who = f"账号「{sender}」" + (f"（揽收人写的「{collector}」）" if collector else "")
+        self._notify_admins(f"{who}晒了单，但四张名册里都查不到这个人：这单先只记进攻坚群总表（按晒单里写的支局）。"
+                            f"请把他补进名册，或在 data/userid_map.json 里加上「账号: 姓名」，补好后自动归类")
+
     def _notify_admins(self, text: str) -> None:
-        """单聊发给每个管理员（企微单聊的会话 ID 就是账号 ID）。"""
+        """
+        单聊提醒（企微单聊的会话 ID 就是账号 ID）。发给 backup.notify 列的人 —— 管理员以后会多，
+        提醒只发黄涛（09-29 用户定）；notify 没配才发给全部管理员。
+        """
         send = getattr(self.platform, "send_text", None)
         if send is None:
             return
-        for uid in self.store.backup_settings().admins or ():
+        cfg = self.store.backup_settings()
+        for uid in cfg.notify or cfg.admins or ():
             try:
                 send(uid, text)
             except Exception:
                 log.exception("给管理员 %s 发提醒失败", uid)
+
+    _CHIEF_CMD = re.compile(r"^\s*(休息|补记)\s+")
+    _TIME_TOKEN = re.compile(r"^(\d{1,2})[:：](\d{2})$")
+    _DATE_TOKEN = re.compile(r"^(\d{1,2})[.．/月](\d{1,2})日?$")
+
+    def _handle_chief_command(self, msg: InboundMessage) -> bool:
+        """
+        「休息 杨钰航」「休息 杨钰航 10.2」→ 那天早会 / 中午集合 / 第1户写休息；
+        「补记 严健齐 10:37」「补记 文龙 严健齐 10.2 10:37」→ 加一户（认不出脸时人工补）。只给管理员单聊。
+        """
+        text = (msg.text or "").strip()
+        m = self._CHIEF_CMD.match(text)
+        if not m or msg.has_image or msg.has_file:
+            return False
+        if msg.chat_type != "p2p":
+            self.platform.reply(msg, "支局长点检请管理员单聊我改", msg.sender_id or None)
+            return True
+        if not self._is_admin(msg):
+            self.platform.reply(msg, "只有管理员能改支局长点检", None)
+            return True
+        kind = m.group(1)
+        tokens = text.split()[1:]
+        chiefs = self.rosters.chiefs.names()
+        name = next((t for t in tokens if t in chiefs), "")
+        tm = next((self._TIME_TOKEN.match(t) for t in tokens if self._TIME_TOKEN.match(t)), None)
+        dm = next((self._DATE_TOKEN.match(t) for t in tokens if self._DATE_TOKEN.match(t)), None)
+        if not name:
+            others = [t for t in tokens if not self._TIME_TOKEN.match(t) and not self._DATE_TOKEN.match(t)]
+            who = others[-1] if others else ""
+            self.platform.reply(msg, f"支局长名单里没有「{who}」，这样发：{kind} 严健齐"
+                                     + (" 10:37" if kind == "补记" else ""), None)
+            return True
+        today = datetime.now().date()
+        day = today
+        if dm:
+            try:
+                day = today.replace(month=int(dm.group(1)), day=int(dm.group(2)))
+            except ValueError:
+                self.platform.reply(msg, "日期不对，这样写：10.2", None)
+                return True
+        d = day.strftime("%Y-%m-%d")
+        if kind == "休息":
+            self.chief_board.add_manual("rest", name, d)
+            self.platform.reply(msg, f"已标记：{name} {day.month}.{day.day} 休息", None)
+            return True
+        if not tm:
+            self.platform.reply(msg, f"要写几点，这样发：补记 {name} 10:37", None)
+            return True
+        hm = f"{int(tm.group(1)):02d}:{tm.group(2)}"
+        self.chief_board.add_manual("add", name, d, hm)
+        self.platform.reply(msg, f"已补记：{name} {day.month}.{day.day} {hm} 一户", None)
+        return True
+
+    _ROSTER_PENDING_SECONDS = 120
+
+    def _handle_roster_command(self, msg: InboundMessage) -> bool:
+        text = (msg.text or "").strip()
+        if text not in regions.ROSTER_COMMANDS or msg.has_image:
+            return False
+        if msg.chat_type != "p2p":
+            self.platform.reply(msg, "名册请管理员单聊我发", msg.sender_id or None)
+            return True
+        if not self._is_admin(msg):
+            self.platform.reply(msg, "名册只能管理员更新", None)
+            return True
+        self._roster_pending[(msg.chat_id, msg.sender_id)] = (text, time.time() + self._ROSTER_PENDING_SECONDS)
+        if msg.has_file:
+            self._handle_file(msg)
+        else:
+            self.platform.reply(msg, f"好，2 分钟内把{text}的 Excel 发过来", None)
+        return True
 
     def _handle_group_check(self, msg: InboundMessage) -> bool:
         if (msg.text or "").strip() != "群号核对" or msg.has_image or msg.has_file:
@@ -575,6 +741,26 @@ class Pipeline:
 
     # ---------- 单聊打卡 ----------
 
+    def _checkin_identity(self, sender: str, members: str, stamp: str = "", branch: str = "") -> tuple[str, str | None]:
+        """
+        打卡归谁（09-29 用户定）：① 先按发送人账号查名册 —— 活动人员记到他那区；认出来但不是活动人员 → 不记；
+        ② 账号认不出，再按水印「小组成员」找活动人员；③ 都不行 → 不记，让他改账号或照片人员信息后重发。
+        单群模式不管，照旧都记。
+        """
+        if not regions.multi_enabled(self.store):
+            return "ok", None
+        self.rosters.maybe_reload()
+        rs = self.rosters.on(stamp[:10])      # 国庆每天名单不同：按水印那天的名单（09-29）
+        who = rs.identify_sender(sender, branch) if sender else regions.Identity()
+        if who.role == regions.ACTIVITY:
+            return "ok", who.region
+        if who.role == regions.OTHER:
+            return "non_activity", None
+        by_members = rs.identify_members(members)
+        if by_members.role == regions.ACTIVITY:
+            return "ok", by_members.region
+        return "unknown", None
+
     def _handle_p2p_checkin(self, msg: InboundMessage) -> bool:
         """单聊里的照片按正式打卡记，判完回执（带判定，09-28 用户选 B）。"""
         if msg.chat_type != "p2p" or not msg.image_ids or not self.store.checkin_settings().enabled:
@@ -582,7 +768,18 @@ class Pipeline:
         if activity.managed() and not activity.is_active():
             self.platform.reply(msg, "现在不在活动期间，打卡没有记录", None)
             return True
-        blobs = [b for b in (self.platform.download_image(msg, i) for i in msg.image_ids) if b]
+        # 一条消息里几张图每张都下；企微偶尔下载失败，重试一次。还失败的在回执里点名是第几张，
+        # 不再悄悄跳过（09-29 用户担心同时发几张会漏）
+        got: list[bytes | None] = []
+        for image_id in msg.image_ids:
+            blob = self.platform.download_image(msg, image_id)
+            if not blob:
+                time.sleep(1)
+                blob = self.platform.download_image(msg, image_id)
+                if not blob:
+                    log.warning("打卡照片下载两次都失败 | %s | %s", msg.sender_id, image_id)
+            got.append(blob)
+        blobs = [b for b in got if b]
         if not blobs:
             self.platform.reply(msg, "照片没下载下来，再发一次", None)
             return True
@@ -592,14 +789,24 @@ class Pipeline:
                 results = fut.result()
             except Exception:
                 log.exception("单聊打卡出错")
-                results = [("error", None)]
+                results = [("error", None)] * len(blobs)
+            it = iter(results)
+            per_image = [next(it, ("error", None)) if b else ("download_failed", None) for b in got]
             try:
-                self.platform.reply(msg, _checkin_receipt(results), None)
+                self.platform.reply(msg, _checkin_receipt(per_image), None)
             except Exception:
                 log.exception("单聊打卡回执没发出去")
 
-        # 和群里的打卡同一个单线程池排队：判定要几秒，回执判完再发
-        self.checkin_pool.submit(self.checkin.record, msg.msg_id, blobs, msg.sender_id).add_done_callback(done)
+        # 和群里的打卡同一个单线程池排队：判定要几秒，回执判完再发（回执发出才从「在途」里划掉）
+        msg._checkin_queued = True
+
+        def done_and_clear(fut) -> None:
+            try:
+                done(fut)
+            finally:
+                self._done_photo(msg)
+        self.checkin_pool.submit(self.checkin.record, msg.msg_id, blobs, msg.sender_id).add_done_callback(
+            done_and_clear)
         return True
 
     # ---------- 单聊取备份 ----------
@@ -663,12 +870,28 @@ class Pipeline:
         if not hasattr(self.platform, "send_file"):
             self.platform.reply(msg, "这会儿发不了表格，稍后再试", None)
             return True
+        multi = regions.multi_enabled(self.store)
+        if multi and not self._is_admin(msg):
+            self.platform.reply(msg, "表格只有管理员能要", None)       # 09-29 用户定：所有表格只给管理员
+            return True
 
-        want_ck = "打卡" in text
+        want_ck = "打卡" in text and "支局长" not in text
         want_sales = bool(re.search(r"晒单|业绩|清单|台账", text))
         kinds = (["打卡"] if want_ck and not want_sales else
                  ["晒单"] if want_sales and not want_ck else ["晒单", "打卡"])
-        spec = _EXCEL_NOISE.sub("", text).strip() or "today"
+        # 多群：「城区 / 农村」挑区域，没说就两个区都发；「总表」「支局长」是攻坚群那两张
+        wanted: list[tuple[str, str | None]] = []
+        if multi:
+            if "总表" in text:
+                wanted.append(("总表", None))
+            if "支局长" in text or "点检" in text:
+                wanted.append(("支局长", None))
+            if not wanted or want_ck or want_sales:
+                areas = [r for r in regions.REGIONS if r in text] or list(regions.REGIONS)
+                wanted += [(k, a) for a in areas for k in kinds]
+        else:
+            wanted = [(k, None) for k in kinds]
+        spec = _EXCEL_NOISE.sub("", re.sub(r"城区|农村|总表|支局长|点检", "", text)).strip() or "today"
         try:
             _since, until, _label = resolve_period(spec)
         except Exception:
@@ -677,7 +900,7 @@ class Pipeline:
         # 要的是一段（「上周的清单」）就取最后一天，那份的清单是整周的；不超过今天
         day = min(datetime.strptime(until[:10], "%Y-%m-%d").date(), datetime.now().date())
 
-        key = f"{msg.chat_id}|{'+'.join(kinds)}|{day}"
+        key = f"{msg.chat_id}|{wanted}|{day}"
         now = time.time()
         if now - self._excel_last.get(key, 0) < 30:
             log.info("同样的表格 30 秒内要过了，忽略")
@@ -687,15 +910,16 @@ class Pipeline:
         from .archive import get_excel
         camp = self.campaign()
         camp.refresh_roster()
-        for kind in kinds:
+        for kind, area in wanted:
+            label = f"{area or ''}{kind}"
             try:
-                path = get_excel(self.store, camp, kind, day)
+                path = get_excel(self.store, camp, kind, day, area)
             except Exception:
-                log.exception("生成%s表格失败", kind)
-                self.platform.reply(msg, f"{kind}表格生成失败了，稍后再试", None)
+                log.exception("生成%s表格失败", label)
+                self.platform.reply(msg, f"{label}表格生成失败了，稍后再试", None)
                 continue
             if path is None:
-                self.platform.reply(msg, f"没有{kind}表格（{kind}功能没开）", None)
+                self.platform.reply(msg, f"没有{label}表格（这个功能没开）", None)
                 continue
             ok = self.platform.send_file(msg.chat_id, path)
             log.info("%s表格%s -> %s | %s", kind, "已发" if ok else "发送失败", msg.sender_id, path.name)
@@ -731,7 +955,12 @@ class Pipeline:
             return False
 
         log.info("助手收到提问 | %s | %s", msg.sender_name or msg.sender_id, text[:60])
-        answer = assistant.ask(msg.text.strip(), msg.chat_id, msg.sender_name)
+        # 城区群按城区、农村群按农村、攻坚群 / 单聊按全部（09-29）：助手查数时取的台账跟着这个走
+        self._tls.scope = regions.scope_of_chat(self.store, msg.chat_type, msg.chat_id)
+        try:
+            answer = assistant.ask(msg.text.strip(), msg.chat_id, msg.sender_name)
+        finally:
+            self._tls.scope = None
         if answer is None:
             if cfg.error_reply:
                 self.platform.reply(msg, cfg.error_reply, msg.sender_id if cfg.at_sender else None)
@@ -747,6 +976,12 @@ class Pipeline:
                      (time.perf_counter() - t0) * 1000, answer[:60].replace("\n", " "))
         return True
 
+    def _assistant_campaign(self) -> Campaign:
+        """问答助手的台账：按当前这条消息所在的群分区（见 _ask_assistant）。"""
+        camp = self.campaign()
+        scope = getattr(self._tls, "scope", None)
+        return regions.scoped(camp, self.store, scope) if scope else camp
+
     def _get_assistant(self, cfg: AssistantSettings) -> Assistant | None:
         if self._assistant is not None and self._assistant_key is cfg:
             return self._assistant
@@ -756,7 +991,7 @@ class Pipeline:
             log.error("assistant 已开启，但环境变量 %s 为空", cfg.api_key_env or llm.api_key_env)
             self._assistant, self._assistant_key = None, cfg
             return None
-        self._assistant = Assistant(cfg, llm, api_key, self.campaign,
+        self._assistant = Assistant(cfg, llm, api_key, self._assistant_campaign,
                                     self.store.campaign_settings, self.bulletin)
         self._assistant_key = cfg
         log.info("问答助手已启用：%s @ %s", self._assistant.model, self._assistant.base_url)
@@ -945,7 +1180,11 @@ class Pipeline:
         if self._campaign is None:
             with self._campaign_lock:
                 if self._campaign is None:
-                    self._campaign = Campaign(Roster(), self.store.campaign_settings().targets)
+                    if regions.multi_enabled(self.store):
+                        self._campaign = Campaign(self.rosters.activity[regions.CITY],
+                                                  self.store.campaign_settings().targets, rosters=self.rosters)
+                    else:
+                        self._campaign = Campaign(Roster(), self.store.campaign_settings().targets)
         return self._campaign
 
     def _record_rule_order(self, msg: InboundMessage, text: str, rule) -> None:
@@ -1017,6 +1256,8 @@ class Pipeline:
             order.note = (order.note + " 疑似重复，请核对").strip()
 
         if camp.add(order):
+            if getattr(order, "role", "") == regions.UNKNOWN:
+                self._remind_unknown(msg.sender_id, order.collector)
             log.info("已入清单 | %s %s | 揽收人=%s 战区=%s%s",
                      order.kind, order.fee, order.collector,
                      order.team or "未归队",
@@ -1112,6 +1353,30 @@ class Pipeline:
                 continue
             name = name or "（无文件名的 Excel）"
             camp = self.campaign()
+            if regions.multi_enabled(self.store) and self._is_admin(msg):
+                # 多群模式：必须先说是哪张名册（四张 + 支局长名单格式都不一样，猜错了会覆盖别的表）
+                which, until = self._roster_pending.pop((msg.chat_id, msg.sender_id), ("", 0.0))
+                if not which or time.time() > until:
+                    self.platform.reply(msg, "请先说是哪张名册：城区支局名册 / 城区活动名册 / 农村支局名册 / "
+                                             "农村活动名册 / 支局长名单，再发 Excel", None)
+                    continue
+                try:
+                    summary = self.rosters.import_named(which, data)
+                except NotRosterSheet as exc:
+                    self.platform.reply(msg, f"{which}没更新：这不像{which}（{exc}）", None)
+                    continue
+                except RosterImportError as exc:
+                    self.platform.reply(msg, f"{which}没更新：{exc}", None)
+                    continue
+                except Exception as exc:
+                    log.exception("导入%s出错", which)
+                    self.platform.reply(msg, f"{which}没更新成：{exc}", None)
+                    continue
+                moved = camp.reassign()
+                text = f"{which}已更新：{summary}" + (f"，已有 {moved} 单重新归类" if moved else "")
+                log.info("%s（来自 %s）", text, name)
+                self.platform.reply(msg, text, None)
+                continue
             if not self._is_admin(msg):
                 # 名册只给管理员更新（09-28）：别人发的先看是不是名册表，是才提示，不是就当普通文件不理
                 try:
@@ -1207,6 +1472,13 @@ class Pipeline:
         cfg = self.store.tally_settings()
         if not cfg.enabled or not result["is_new"] or not self._counts(msg):
             return
+        if regions.multi_enabled(self.store):
+            role = regions.group_role(self.store, msg.chat_id)
+            if role == "hq":
+                return          # 战报只在活动群播，攻坚群里的单只点赞（09-29 用户定）
+            order = self.campaign().find(msg.msg_id) if role in regions.REGION_OF_ROLE else None
+            if order is not None and not self._counts_for_tally(msg, order, regions.REGION_OF_ROLE[role]):
+                return
 
         if not branch:
             # 支局没识别出来就不播 —— 播一个没有支局名的战报没意义，
@@ -1259,6 +1531,20 @@ class Pipeline:
         self.platform.reply(msg, text, None)
         self.sendlog.record(text, "战报", msg.chat_id, dedupe=True)
 
+    def _counts_for_tally(self, msg: InboundMessage, order, region: str) -> bool:
+        """
+        活动群的战报只数【本群的活动人员】的单，和这个群的业绩通报一个口径（09-29 用户定）。
+        非活动人员：@他提醒一句去攻坚群晒（这单照常点赞、照常进总表）；认不出的人管理员那边已经提醒了，这里不回。
+        """
+        if order.role == regions.ACTIVITY and order.region == region:
+            return True
+        if order.role == regions.OTHER:
+            hq = next((g.name for g in self.store.groups() if g.role == "hq"), "") or "攻坚群"
+            self.platform.reply(msg, f"您不是本次活动人员，此单已计入总表，后续请到「{hq}」晒单",
+                                msg.sender_id or None)
+        log.info("战报不计：晒单人是%s（%s），不是本群的活动人员", order.role or "未识别", order.region or "区域未知")
+        return False
+
     # ---------- 发送 ----------
 
     def _reply(self, msg: InboundMessage, text: str, at_sender: bool,
@@ -1279,7 +1565,12 @@ class Pipeline:
         队列里再排几条，Ctrl+C 之后要等好几分钟才退，用起来像卡死了。
         没做完的活不会丢：下次启动重叠窗会把这些消息重新拉到。
         """
+        # 还没回执的单聊照片先挨个说一声（长连接的消息不会重投，扔了就真没了）
+        try:
+            self.notify_unfinished()
+        except Exception:
+            log.exception("关机前提醒重发出错")
         # cancel_futures：把还没开始跑的任务直接扔掉，不再排队执行
-        for pool in (self.pool, self.ocr_pool):
+        for pool in (self.pool, self.ocr_pool, self.checkin_pool):
             pool.shutdown(wait=False, cancel_futures=True)
         log.info("已取消排队任务，等在途任务收尾（最多 %.0f 秒）", timeout)

@@ -31,14 +31,25 @@ KINDS = ("晒单", "打卡")
 
 def _campaign(store):
     from .campaign import Campaign, Roster
-    camp = Campaign(Roster(), store.campaign_settings().targets)
+    from . import regions
+    if regions.multi_enabled(store):
+        rs = regions.RosterSet()
+        return Campaign(rs.activity[regions.CITY], store.campaign_settings().targets, rosters=rs)
+    return Campaign(Roster(), store.campaign_settings().targets)
+
+
+def _region_camp(store, camp, region: str | None, day: date | None = None):
+    """多群某区：只读视图（这个区活动人员的单 + 这个区那天的活动名册和目标）。"""
+    if region and getattr(camp, "rosters", None) is not None:
+        return camp.view(region, store.campaign_settings().targets_for(region), day.isoformat() if day else "")
     return camp
 
 
-def build_sales(store, camp, day: date, out: Path) -> Path:
-    """晒单 Excel：那天的晒单数据 + 那周周一到那天的清单。"""
+def build_sales(store, camp, day: date, out: Path, region: str | None = None) -> Path:
+    """晒单 Excel：那天的晒单数据 + 那周周一到那天的清单。region：多群模式的 城区 / 农村。"""
     from .report import build_workbook, summary_title
     cfg = store.campaign_settings()
+    camp = _region_camp(store, camp, region, day)
     end = datetime.combine(day, dtime(23, 59, 59))
     now = min(end, datetime.now())
     rank = cfg.window("rank", end)
@@ -48,15 +59,16 @@ def build_sales(store, camp, day: date, out: Path) -> Path:
     return build_workbook(camp, out, title, rank=rank, ledger=ledger)
 
 
-def build_checkin(store, camp, day: date, out: Path) -> Path:
-    """打卡 Excel：那天上午 / 下午 / 晚上三张表。"""
+def build_checkin(store, camp, day: date, out: Path, region: str | None = None) -> Path:
+    """打卡 Excel：那天上午 / 下午 / 晚上三张表。region：多群模式的 城区 / 农村。"""
     from openpyxl import Workbook
     from .checkin import day_sheets, write_checkin_sheet
     ck = store.checkin_settings()
+    roster = _region_camp(store, camp, region, day).roster
     wb = Workbook()
     wb.remove(wb.active)
-    for name, title, records in day_sheets(ck, day.strftime("%Y-%m-%d"), store.campaign_settings().title):
-        write_checkin_sheet(wb.create_sheet(name), records, camp.roster, title, ck.columns)
+    for name, title, records in day_sheets(ck, day.strftime("%Y-%m-%d"), store.campaign_settings().title, region):
+        write_checkin_sheet(wb.create_sheet(name), records, roster, title, ck.columns)
     out.parent.mkdir(parents=True, exist_ok=True)
     wb.save(out)
     return out
@@ -65,36 +77,78 @@ def build_checkin(store, camp, day: date, out: Path) -> Path:
 _BUILDERS = {"晒单": build_sales, "打卡": build_checkin}
 
 
-def archive_path(kind: str, day: date) -> Path:
-    return ARCHIVE_DIR / kind / f"{kind}_{day:%Y-%m-%d}.xlsx"
+def _hq_builders() -> dict:
+    """攻坚群的两张表（支局总表、支局长打卡点检表）：各自模块提供 build_excel(store, camp, day, out)。"""
+    out = {}
+    try:
+        from .zongbiao import build_excel as zb
+        out["总表"] = zb
+    except ImportError:
+        pass
+    try:
+        from .chiefs import build_excel as cb
+        out["支局长"] = cb
+    except ImportError:
+        pass
+    return out
+
+
+def specs(store) -> list[tuple[str, str | None]]:
+    """要存哪些表：单群 [(晒单, None), (打卡, None)]；多群 两区各一份晒单、打卡 + 总表 + 支局长。"""
+    from . import regions
+    ck = store.checkin_settings().enabled
+    if not regions.multi_enabled(store):
+        return [(k, None) for k in KINDS if k != "打卡" or ck]
+    out = []
+    for region in regions.REGIONS:
+        out.append(("晒单", region))
+        if ck:
+            out.append(("打卡", region))
+    out += [(k, None) for k in _hq_builders()]
+    return out
+
+
+def _name(kind: str, region: str | None) -> str:
+    return f"{kind}_{region}" if region else kind
+
+
+def archive_path(kind: str, day: date, region: str | None = None) -> Path:
+    return ARCHIVE_DIR / kind / f"{_name(kind, region)}_{day:%Y-%m-%d}.xlsx"
+
+
+def _build(store, camp, kind: str, day: date, out: Path, region: str | None) -> Path:
+    if kind in _BUILDERS:
+        return _BUILDERS[kind](store, camp, day, out, region)
+    return _hq_builders()[kind](store, camp, day, out)
 
 
 def archive_day(store, day: date) -> list[Path]:
-    """存某天的两份报表（覆盖已有的）。"""
+    """存某天的报表（覆盖已有的）。"""
     camp = _campaign(store)
     out = []
-    for kind in KINDS:
-        if kind == "打卡" and not store.checkin_settings().enabled:
+    for kind, region in specs(store):
+        try:
+            p = _build(store, camp, kind, day, archive_path(kind, day, region), region)
+        except Exception:
+            log.exception("存档 %s 失败", _name(kind, region))
             continue
-        p = _BUILDERS[kind](store, camp, day, archive_path(kind, day))
         log.info("报表已存档：%s", p.name)
         out.append(p)
     return out
 
 
 def prune(keep_days: int, today: date | None = None) -> int:
-    """删 keep_days 天以前的存档（按文件名里的日期）和 reports/ 里的表格图片（按修改时间）。"""
+    """删 keep_days 天以前的存档（按文件名末尾的日期）和 reports/ 里的表格图片（按修改时间）。"""
     today = today or date.today()
     cutoff = today - timedelta(days=keep_days)
     n = 0
-    for kind in KINDS:
-        for p in (ARCHIVE_DIR / kind).glob(f"{kind}_*.xlsx"):
-            try:
-                if datetime.strptime(p.stem[len(kind) + 1:], "%Y-%m-%d").date() < cutoff:
-                    p.unlink()
-                    n += 1
-            except ValueError:
-                continue
+    for p in ARCHIVE_DIR.glob("*/*.xlsx") if ARCHIVE_DIR.is_dir() else ():
+        try:
+            if datetime.strptime(p.stem[-10:], "%Y-%m-%d").date() < cutoff:
+                p.unlink()
+                n += 1
+        except ValueError:
+            continue
     reports = DATA / "reports"
     limit = datetime.combine(cutoff, dtime()).timestamp()
     for p in reports.glob("*"):
@@ -106,20 +160,22 @@ def prune(keep_days: int, today: date | None = None) -> int:
     return n
 
 
-def get_excel(store, camp, kind: str, day: date) -> Path | None:
+def get_excel(store, camp, kind: str, day: date, region: str | None = None) -> Path | None:
     """
     单聊要表格用：今天的当场生成（放 reports/，不进存档）；以前的优先拿存档，没有就用现在的数据补一份。
-    打卡没开就没有打卡表，返回 None。
+    打卡没开就没有打卡表、没有那个模块就没有那张表，返回 None。
     """
     if kind == "打卡" and not store.checkin_settings().enabled:
         return None
+    if kind not in _BUILDERS and kind not in _hq_builders():
+        return None
     if day < date.today():
-        p = archive_path(kind, day)
+        p = archive_path(kind, day, region)
         if p.is_file():
             return p
     out_dir = DATA / store.bulletin_settings().out_dir
     stamp = datetime.now().strftime("%H%M%S")
-    return _BUILDERS[kind](store, camp, day, out_dir / f"{kind}_{day:%Y-%m-%d}_{stamp}.xlsx")
+    return _build(store, camp, kind, day, out_dir / f"{_name(kind, region)}_{day:%Y-%m-%d}_{stamp}.xlsx", region)
 
 
 def main(argv: list[str]) -> int:

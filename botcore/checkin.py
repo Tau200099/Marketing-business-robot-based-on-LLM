@@ -118,6 +118,7 @@ class Checkin:
     sender: str = ""        # 发照片的人的企微账号 ID（长连接只给 ID 不给姓名）
     code: str = ""          # 水印防伪码：每张照片唯一，去重用（企微转发会重压缩，文件指纹对不上）
     model: str = ""         # 哪个视觉模型判的（额度用完会自动换模型，留个底）
+    region: str = ""        # 多群：城区 / 农村（按发送人 / 水印小组成员认出来的活动人员所在区；老记录为空 = 城区）
 
 
 # ---------------- 水印 ----------------
@@ -275,6 +276,10 @@ _CALC = re.compile(r"\d{2,}|[+×÷=＝]")
 # 手写字 OCR 常读不出来：模型说是拿笔在纸上写画的也认（09-28 #93 拿笔在宣传单上圈画，同事标算账）。
 # 不认「算」「计算器」这类字：座机被脑补成计算器的就是这么说的
 _HANDWRITING = re.compile(r"笔|手写|纸上|写|圈|画")
+# 09-29 放宽：模型证据里写了摊位类的东西，地点没报「摊位」也当摊位（#19「站在摊位前…展板」、#61「红桌摊位」被退成无效）
+_STALL_WORDS = re.compile(r"摊位|展台|展板|帐篷|易拉宝|折叠桌")
+# 09-29 放宽：拿笔在纸上写 / 圈 / 画 / 算，模型判成板夹或拦截的改判算账（#93「手持笔在翻开的资费单上书写」）
+_PEN_WRITING = re.compile(r"笔.{0,15}(?:写|圈|画|算)|手写")
 
 
 def _scene_text(items_text: list[str]) -> str:
@@ -476,6 +481,10 @@ class VisionJudge:
         if "监控" in evidence:
             tv = "普通节目"     # 监控多格画面会被认成云盒菜单（09-28 #75）
         talking = not (data.get("talking") is False or str(data.get("talking")).lower() == "false")
+        if place != "摊位" and _STALL_WORDS.search(evidence):
+            place = "摊位"
+        if label in ("板夹", "拦截") and people is not False and _PEN_WRITING.search(evidence):
+            label = "算账"
         if place == "摊位":
             # 摊位上一律算拦截：桌上摆着资料设备也是、没拍到正在说话也是（09-24 同事的标法）
             if label in ("板夹", "设备演示", "无效") and people is not False:
@@ -540,6 +549,27 @@ class CheckinStore:
         self._write(payload)
         return True
 
+    def replace(self, old_photo: str, new: "Checkin") -> "Checkin | None":
+        """
+        无效打卡兜底：新的有效照片替换旧的那条无效。留旧的 时间 / 时段（09-29 用户定：用旧的时间），
+        其余（类型、颜色、来源、证据、照片指纹、防伪码……）换成新的。返回替换后的记录；旧的没了返回 None。
+        """
+        with self._lock:
+            rec = next((r for r in self.records if r.photo == old_photo), None)
+            if rec is None:
+                return None
+            self._photos.discard(rec.photo)
+            self._keys.discard(dedupe_key(rec))
+            keep_at, keep_slot = rec.at, rec.slot
+            for f in Checkin.__dataclass_fields__:
+                setattr(rec, f, getattr(new, f))
+            rec.at, rec.slot = keep_at, keep_slot
+            self._photos.add(rec.photo)
+            self._keys.add(dedupe_key(rec))
+            payload = {"records": [asdict(r) for r in self.records]}
+        self._write(payload)
+        return rec
+
     def _write(self, payload: dict) -> None:
         tmp = self.path.with_suffix(".tmp")
         for attempt in (1, 2):
@@ -590,6 +620,37 @@ class CheckinRecorder:
         self.pending_dir = DATA / "checkin_pending"
         self._retry_lock = threading.Lock()
         self._pool = None
+        # 多群（09-29）：identify(发送人账号, 水印小组成员) -> ("ok", 区域) / ("non_activity", None) / ("unknown", None)；
+        # 没装就照旧谁发的都记。on_photo(照片, 水印) 每张有水印时间的照片都调一次（支局长人脸点检用）
+        self.identify = None
+        self.on_photo = None
+        # 无效打卡兜底：发送人 -> [(截止时刻, 那条无效的照片指纹)]；有效的来了替换最近那条（只在内存，重启就没了）
+        self.retry_minutes_invalid = 10
+        self._invalid_windows: dict[str, list[tuple[float, str]]] = {}
+        self._win_lock = threading.Lock()
+
+    def open_window(self, sender: str, photo: str) -> float:
+        """判成无效 / 待判定：给这个人开 10 分钟重拍窗口，返回截止时刻（给回执写「14:50 前」）。"""
+        deadline = time.time() + self.retry_minutes_invalid * 60
+        if sender:
+            with self._win_lock:
+                self._invalid_windows.setdefault(sender, []).append((deadline, photo))
+        return deadline
+
+    def _take_window(self, sender: str) -> str | None:
+        """有效的来了：取这个人最近一条还在窗口里、而且还是无效 / 待判定的那条（补判改成有效了的跳过）。"""
+        if not sender:
+            return None
+        now = time.time()
+        with self._win_lock:
+            wins = [w for w in self._invalid_windows.get(sender, []) if w[0] >= now]
+            self._invalid_windows[sender] = wins
+            while wins:
+                _deadline, photo = wins.pop()
+                old = self.store.find(photo)
+                if old is not None and (old.source == "待判定" or old.label == DISPLAY["无效"]):
+                    return photo
+        return None
 
     # ---------- 「待判定」补判（09-28） ----------
     # 视觉模型判不了（额度用完、key 失效、网络）的照片，把【涂黑缩小后】送模型的那张图和
@@ -765,27 +826,55 @@ class CheckinRecorder:
         if not wm["stamp"]:
             log.info("水印照片没认出时间，不记打卡")
             return "no_time", None
+        if self.on_photo is not None:
+            try:                        # 支局长人脸点检：谁发的、记不记打卡都要看（09-29 用户定）
+                self.on_photo(blob, wm, photo)
+            except Exception:
+                log.exception("支局长人脸点检出错（不影响打卡）")
         # 企微转发会重压缩，文件指纹对不上 —— 按防伪码再判一次，省得重复调模型
         if self.store.has_key(dedupe_key(wm)):
             log.info("打卡照片重复发送，不重复记（%s）", wm["code"] or wm["stamp"])
             return "dup", wm["stamp"]
 
+        region = ""
+        if self.identify is not None:
+            # 只有活动人员打卡（09-29）：① 发送人账号 ② 认不出再看水印小组成员 ③ 还不行就不记，回一句让他改信息重发
+            status, region = self.identify(sender, wm.get("members", ""), wm.get("stamp", ""), wm.get("branch", ""))
+            if status != "ok":
+                log.info("打卡没记（%s）| 发送人=%s | 小组成员=%s", status, sender or "?", wm.get("members") or "空")
+                return status, None
+            region = region or ""
         label, color, source, evidence = self.classify(wm, shrunk, items)
         rec = Checkin(at=wm["stamp"], slot=slot_of(wm["stamp"][11:16], s.slots),
                       branch=wm["branch"], members=wm["members"], work=wm["work"],
                       label=label, color=color, source=source, evidence=evidence,
                       photo=photo, msg_id=msg_id,
                       received=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), sender=sender,
-                      code=wm["code"], model=self._judge.last_model if source == "视觉" else "")
+                      code=wm["code"], model=self._judge.last_model if source == "视觉" else "",
+                      region=region)
         if source == "待判定":
             # 存涂黑缩小后的图等补判（09-28 用户同意：最多留 pending_keep_days 天，判出来就删）
             self._save_pending(photo, mask_and_encode(shrunk, items, s.image_max_side),
                                [t for _b, t in items], wm["work"])
+        invalid = source == "待判定" or label == DISPLAY["无效"]
+        if not invalid:
+            old_photo = self._take_window(sender)
+            if old_photo:
+                old = self.store.find(old_photo)
+                old_at = old.at if old else ""
+                replaced = self.store.replace(old_photo, rec)
+                if replaced is not None:
+                    self._drop_pending(old_photo)          # 旧的要是待判定，存的图不用再补判了
+                    log.info("打卡替换无效 | %s | 发送人=%s | %s -> %s（%s）", old_at, sender or "?",
+                             DISPLAY["无效"], rec.label, rec.source)
+                    return "replaced", (replaced, old_at)
         if not self.store.add(rec):
             return "dup", rec.at
         log.info("打卡 | %s %s | 发送人=%s | %s %s | 工作内容=%s | %s（%s）%s", rec.at, rec.slot or "时段外",
                  sender or "?", rec.branch or "?", rec.members or "?", rec.work or "空", rec.label,
                  rec.source, f" 证据：{evidence}" if evidence else "")
+        if invalid:
+            return "invalid", (rec, self.open_window(sender, photo))
         return "recorded", rec
 
 
@@ -849,6 +938,15 @@ def sender_name(userid: str, roster) -> str:
         _py_cache.update(names=names, index=index)
     hits = _py_cache["index"].get(key, set())
     return next(iter(hits)) if len(hits) == 1 else ""
+
+
+def pinyin_candidates(userid: str, roster) -> set[str]:
+    """账号拼音对上的所有姓名（sender_name 只在唯一时返回，撞车时用这个拿到全部候选）。"""
+    key = re.sub(r"[^a-z]", "", (userid or "").lower())
+    if not key:
+        return set()
+    sender_name(userid, roster)            # 顺带建好 / 刷新拼音索引
+    return set(_py_cache["index"].get(key, set()))
 
 
 # ---------------- 归组 ----------------
@@ -1006,9 +1104,17 @@ def checkin_title(s: CheckinSettings, day: str, campaign_title: str, start: str,
     return f"{span_label(s, day)}日{campaign_title or '营销活动'}过程管控情况（{start}-{end}时段）"
 
 
-def day_sheets(s: CheckinSettings, day: str, campaign_title: str) -> list[tuple[str, str, list[Checkin]]]:
-    """某天按时段的几张表：[(sheet 名, 标题, 记录)]。day = YYYY-MM-DD。"""
-    records = load_records(DATA / s.store_file)
+def of_region(records: list[Checkin], region: str | None) -> list[Checkin]:
+    """多群：只要某个区的打卡。region 为 None 不筛；老记录没有 region 算城区。"""
+    if region is None:
+        return records
+    return [r for r in records if (r.region or "城区") == region]
+
+
+def day_sheets(s: CheckinSettings, day: str, campaign_title: str,
+               region: str | None = None) -> list[tuple[str, str, list[Checkin]]]:
+    """某天按时段的几张表：[(sheet 名, 标题, 记录)]。day = YYYY-MM-DD。region = 城区 / 农村（多群）。"""
+    records = of_region(load_records(DATA / s.store_file), region)
     out = []
     for slot in s.slots:
         name = str(slot.get("name", ""))
