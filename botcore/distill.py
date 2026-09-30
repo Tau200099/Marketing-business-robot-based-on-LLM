@@ -67,6 +67,12 @@ _WORK_BARE = re.compile(
 # 支局。先按「支局：xxx支局」的字段形式找，找不到再在全文里捞。
 # 注意必须在脱敏和截断【之前】提取 —— 支局在水印里的位置和工作内容隔得远。
 _BRANCH_FIELD = re.compile(r"(?:支\s*局|工作单位)\s*[:：]\s*([一-龥]{2,6}?支局)")
+# 「支局：古南」没写「支局」两个字（09-30 用户：古南、古南支局都要能认）：只认这 17 个支局名，免得抓错；
+# OCR 常把字拆开（「古 南」），字中间允许空格。认出来统一写成「古南支局」
+KNOWN_BRANCHES = ("通惠", "古南", "文龙", "万盛", "东林", "打通", "赶水", "东溪", "青年", "新盛", "郭扶",
+                  "三江", "南桐", "安稳", "永新", "隆盛", "三角")
+_BRANCH_SHORT = re.compile(r"(?:支\s*局|工作单位)\s*[:：]\s*("
+                           + "|".join(r"\s*".join(n) for n in KNOWN_BRANCHES) + r")")
 # 宽松匹配只在【没有字段名】时用。以前 [一-龥]{2,4} 贪心往前吃，
 # 「预约文龙支局」抓成「预约文龙支局」、「去了东林支局」抓成「了东林支局」，
 # 战报里同一个支局分裂成两个桶。抓到后把前面粘着的动词 / 方位词剥掉，
@@ -212,6 +218,9 @@ def extract_branch(ocr_text: str) -> str:
     m = _BRANCH_FIELD.search(ocr_text)
     if m:
         return m.group(1)
+    m = _BRANCH_SHORT.search(ocr_text)
+    if m:
+        return re.sub(r"\s", "", m.group(1)) + "支局"
     m = _BRANCH_LOOSE.search(ocr_text)
     return _clean_branch(m.group(1)) if m else ""
 

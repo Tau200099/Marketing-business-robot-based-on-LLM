@@ -73,7 +73,20 @@ def test_order_and_checkin():
        "打卡：水印没读到支局 → 照旧看小组成员")
 
 
+def test_watermark_short_branch():
+    """09-30 用户：水印「支局：古南」和「支局：古南支局」都要能认。"""
+    from botcore.checkin import parse_watermark
+    base = "今日水印 时间:2026-09-30 10:00 支局：{b} 小组成员：王小钢、张彬 工作内容：上门"
+    for b, want in (("古南支局", "古南支局"), ("古南", "古南支局"), ("古 南", "古南支局"), ("永新", "永新支局"),
+                    ("万州", ""), ("", "")):
+        eq(parse_watermark(base.format(b=b))["branch"], want, f"水印「支局：{b}」→「{want}」")
+    wm = parse_watermark(base.format(b="永新").replace("王小钢、张彬", ""))
+    eq(p._checkin_identity("ZhangBin", wm["members"], "2026-09-30 10:00", wm["branch"]), ("ok", regions.RURAL),
+       "水印只写「支局：永新」+ 账号 ZhangBin：按支局认出永新张彬，记上")
+
+
 run(test_pick_by_branch)
+run(test_watermark_short_branch)
 run(test_fallback_unchanged)
 run(test_order_and_checkin)
 done()
